@@ -377,3 +377,37 @@ def build_backbone_cbam(model_name="EfficientNetB0",
                   name=f"{model_name}_CBAM")
 
     return model, backbone
+
+def preprocess_for_backbone(img, backbone_name):
+    """
+    Apply the appropriate preprocessing to the image according to the model architecture.
+    """
+    X255 = img * 255.0
+    b = backbone_name.lower()
+
+    if "resnet" in b:
+        return preprocess_resnet(X255)
+    elif "vgg" in b:
+        return preprocess_vgg16(X255)
+    elif "inception" in b:
+        return preprocess_inception(X255)
+    elif "efficientnet" in b:
+        return preprocess_effnet(X255)
+    elif "densenet" in b:
+        return preprocess_densenet(X255)
+    elif "mobilenetv2" in b:
+        return preprocess_mobilenetv2(X255)
+    elif "mobilenetv3" in b:
+        return preprocess_mobilenetv3(X255)
+    else:
+        print("ERROR:")
+        return None
+    
+
+
+def get_true_labels_from_keras_generator(gen):
+    y_true = []
+    for i in range(len(gen)):
+        _, y_batch = gen[i]
+        y_true.extend(np.argmax(y_batch, axis=1))
+    return np.array(y_true)
