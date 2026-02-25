@@ -16,7 +16,12 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as prepr
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as preprocess_mobilenetv3
 
 from tensorflow.keras import backend as K
+import tensorflow as tf
+from tensorflow.keras import layers, Model
+from tensorflow.keras.utils import register_keras_serializable
 
+
+# ------------------------- CUSTOM DATA GENERATOR -------------------------
 class AlbumentationsDataGenerator(Sequence):
     """
     Data generator using Albumentations. Allows loading from a folder or directly
@@ -145,6 +150,9 @@ class AlbumentationsDataGenerator(Sequence):
             return preprocess_mobilenetv3(X255)
         else:
             return X255
+
+# ------------------------- CALLBACKS FOR DEALING WITH MINORITY CLASSES -------------------------
+
 class ClassMetricsCallback(Callback):
     """
     Callback to compute metrics for each class on validation data
@@ -197,7 +205,7 @@ class ClassMetricsCallback(Callback):
             print("validation metrics not computed (empty batch)")
 
 
-# customized loss:
+# ------------------------- CUSTOM LOSS AND METRICS FOR UNBALANCED DATASET -------------------------
 def weighted_categorical_crossentropy(weights):
     """
     Cross-entropy loss weighted using class imbalance: minority class has greater weight.
@@ -247,15 +255,9 @@ def f1_macro(y_true, y_pred, NUM_CLASSES=6):
     r = recall_macro(y_true, y_pred, NUM_CLASSES)
     return 2 * (p * r) / (p + r + K.epsilon())
 
-# CUSTOM OBJECT FOR CBAM BLOCKS AND MODELS:
+# ------------------------- CBAM BLOCK IMPLEMENTATION -------------------------
 
-import tensorflow as tf
-from tensorflow.keras import layers, Model
-from tensorflow.keras.utils import register_keras_serializable
-
-# -------------------------
-# SpatialPooling (para CBAM)
-# -------------------------
+# SpatialPooling layer: computes average and max pooling across channels and concatenates them
 @register_keras_serializable(package="Custom")
 class SpatialPooling(layers.Layer):
     def __init__(self, **kwargs):
@@ -270,9 +272,8 @@ class SpatialPooling(layers.Layer):
         return super().get_config()
 
 
-# -------------------------
-# CBAM BLOCK
-# -------------------------
+# CBAM BLOCK: Convolutional Block Attention Module, with channel and spatial attention mechanisms
+
 @register_keras_serializable(package="Custom")
 def cbam_block(input_tensor, reduction_ratio=16):
     channel = input_tensor.shape[-1]
@@ -307,47 +308,6 @@ def cbam_block(input_tensor, reduction_ratio=16):
     refined = layers.Multiply()([channel_refined, spatial_attention])
     return refined
 
-# EfficientNetB0 + CBAM
-
-def build_efficientnet_cbam(input_shape=(224,224,3), num_classes=6, weights='imagenet'):
-    inp = layers.Input(shape=input_shape)
-    backbone = tf.keras.applications.EfficientNetB0(include_top=False,
-                                                    weights=weights,
-                                                    input_tensor=inp)
-    feat = backbone.output
-    feat = cbam_block(feat, reduction_ratio=16)
-
-
-    feat = layers.GlobalAveragePooling2D()(feat)
-    feat = layers.Flatten()(feat)
-    feat = layers.Dense(256, activation='relu')(feat)
-    feat = layers.Dropout(0.5)(feat) # Droput ajustado, para GAP: 0.3, para Flatten 0.4 - 0.5
-    out = layers.Dense(num_classes, activation='softmax')(feat)
-
-    model = Model(inputs=inp, outputs=out, name="EffNetB0_CBAM")
-    return model, backbone
-
-
-# MobileNetV2 + CBAM
-def build_mobilenetv2_cbam_final(input_shape=(224,224,3), num_classes=6, weights='imagenet'):
-    inp = layers.Input(shape=input_shape)
-    backbone = tf.keras.applications.MobileNetV2(include_top=False,
-                                                 weights=weights,
-                                                 input_tensor=inp)
-    # CBAM block
-    feat = backbone.output
-    feat = cbam_block(feat)
-
-    # Head: GAP + Flatten + Dense + Dropout
-    feat = layers.GlobalAveragePooling2D()(feat)
-    feat = layers.Flatten()(feat)
-    feat = layers.Dense(256, activation='relu')(feat)
-    feat = layers.Dropout(0.5)(feat)
-    out = layers.Dense(num_classes, activation='softmax')(feat)
-
-    model = Model(inputs=inp, outputs=out, name="MobileNetV2_CBAM_final")
-    return model, backbone
-
 def build_backbone_cbam(model_name="EfficientNetB0",
                         input_shape=(224,224,3),
                         num_classes=6,
@@ -378,6 +338,7 @@ def build_backbone_cbam(model_name="EfficientNetB0",
 
     return model, backbone
 
+# ------------------------- PREPROCESSING FOR EACH BACKBONE -------------------------
 def preprocess_for_backbone(img, backbone_name):
     """
     Apply the appropriate preprocessing to the image according to the model architecture.
@@ -404,7 +365,7 @@ def preprocess_for_backbone(img, backbone_name):
         return None
     
 
-
+# ------------------------- AUX FUNCTION -------------------------
 def get_true_labels_from_keras_generator(gen):
     y_true = []
     for i in range(len(gen)):
