@@ -96,6 +96,60 @@ MODEL_SPECS = {
 }
 
 
+def _load_partial_metrics():
+    fold_results = []
+    results = []
+
+    folds_csv = RESULTS_DIR / "cv_fold_metrics.csv"
+    ranking_csv = RESULTS_DIR / "cv_ranking.csv"
+
+    if folds_csv.exists():
+        fold_results = pd.read_csv(folds_csv).to_dict(orient="records")
+    if ranking_csv.exists():
+        results = pd.read_csv(ranking_csv).to_dict(orient="records")
+    return fold_results, results
+
+
+def _persist_partial_metrics(fold_results, results):
+    df_folds = pd.DataFrame(fold_results)
+    df_results = pd.DataFrame(results)
+
+    if not df_folds.empty:
+        df_folds.to_csv(RESULTS_DIR / "cv_fold_metrics.csv", index=False)
+    if not df_results.empty:
+        df_results = df_results.sort_values("f1_macro_mean", ascending=False)
+        df_results.to_csv(RESULTS_DIR / "cv_ranking.csv", index=False)
+
+
+def _find_fold_result(fold_results, model_name, img_size, fold):
+    return next(
+        (
+            row
+            for row in fold_results
+            if (
+                row["model"] == model_name
+                and int(row["img_size"]) == img_size
+                and int(row["fold"]) == fold
+            )
+        ),
+        None,
+    )
+
+
+def _upsert_fold_result(fold_results, row):
+    filtered = [
+        item
+        for item in fold_results
+        if not (
+            item["model"] == row["model"]
+            and int(item["img_size"]) == int(row["img_size"])
+            and int(item["fold"]) == int(row["fold"])
+        )
+    ]
+    filtered.append(row)
+    return filtered
+
+
 def build_model_with_base(model_name, num_classes, img_size, model_specs):
     base_cls, _ = model_specs[model_name]
     base = base_cls(
@@ -141,7 +195,7 @@ def train_two_stage(
     train_ds,
     class_weight,
     val_ds=None,
-    checkpoint_path=None,
+    best_checkpoint_path=None,
 ):
     head_callbacks = []
     finetune_callbacks = []
@@ -162,17 +216,16 @@ def train_two_stage(
                 monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6
             )
         )
-        if checkpoint_path is not None:
+        if best_checkpoint_path is not None:
             finetune_callbacks.append(
                 tf.keras.callbacks.ModelCheckpoint(
-                    filepath=str(checkpoint_path),
+                    filepath=str(best_checkpoint_path),
                     monitor="val_loss",
                     save_best_only=True,
                     save_weights_only=True,
                     verbose=0,
                 )
             )
-
     base_model.trainable = False
     model.compile(
         optimizer=tf.keras.optimizers.Adam(HEAD_LR),
@@ -236,8 +289,7 @@ def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = []
-    fold_results = []
+    fold_results, results = _load_partial_metrics()
 
     for model_name in MODELS:
         _, preprocess_fn = MODEL_SPECS[model_name]
@@ -252,6 +304,26 @@ def main():
 
             fold_scores = []
             for fold, (tr_idx, va_idx) in enumerate(rkf.split(X_train, y_train), start=1):
+                existing = _find_fold_result(fold_results, model_name, img_size, fold)
+                checkpoint_path = (
+                    CHECKPOINTS_DIR
+                    / f"{model_name}_img{img_size}_fold{fold:02d}_best.weights.h5"
+                )
+                if existing is not None:
+                    print(
+                        f"Skipping completed fold with saved metrics: {model_name}|img{img_size}|fold{fold:02d}"
+                    )
+                    fold_scores.append(
+                        {
+                            "f1_macro": float(existing["f1_macro"]),
+                            "f1_weighted": float(existing["f1_weighted"]),
+                            "accuracy": float(existing["accuracy"]),
+                            "precision_macro": float(existing["precision_macro"]),
+                            "recall_macro": float(existing["recall_macro"]),
+                        }
+                    )
+                    continue
+
                 tf.keras.backend.clear_session()
                 tf.keras.utils.set_random_seed(BASE_SEED + fold)
 
@@ -269,29 +341,31 @@ def main():
                 model, base = build_model_with_base(
                     model_name, num_classes, img_size, MODEL_SPECS
                 )
-                checkpoint_path = (
-                    CHECKPOINTS_DIR
-                    / f"{model_name}_img{img_size}_fold{fold:02d}_best.weights.h5"
-                )
-
-                train_two_stage(
-                    model=model,
-                    base_model=base,
-                    train_ds=train_ds,
-                    class_weight=class_weight,
-                    val_ds=val_ds,
-                    checkpoint_path=checkpoint_path,
-                )
+                if checkpoint_path.exists():
+                    print(
+                        f"Skipping training for fold with existing checkpoint: {checkpoint_path.name}"
+                    )
+                    model.load_weights(checkpoint_path)
+                else:
+                    train_two_stage(
+                        model=model,
+                        base_model=base,
+                        train_ds=train_ds,
+                        class_weight=class_weight,
+                        val_ds=val_ds,
+                        best_checkpoint_path=checkpoint_path,
+                    )
 
                 fold_metrics = evaluate_predictions(model, val_ds, y_va)
                 fold_scores.append(fold_metrics)
-                fold_results.append(
+                fold_results = _upsert_fold_result(
+                    fold_results,
                     {
                         "model": model_name,
                         "img_size": img_size,
                         "fold": fold,
                         **fold_metrics,
-                    }
+                    },
                 )
                 print(
                     "Fold "
@@ -302,6 +376,7 @@ def main():
                     f"Prec-macro: {fold_metrics['precision_macro']:.4f} | "
                     f"Recall-macro: {fold_metrics['recall_macro']:.4f}"
                 )
+                _persist_partial_metrics(fold_results, results)
 
             f1_macros = [s["f1_macro"] for s in fold_scores]
             f1_weighted = [s["f1_weighted"] for s in fold_scores]
@@ -325,23 +400,28 @@ def main():
                 f"{model_name} (img={img_size}) | Recall-macro mean±std: {np.mean(recall_macros):.4f} ± {np.std(recall_macros):.4f}"
             )
 
-            results.append(
-                {
-                    "model": model_name,
-                    "img_size": img_size,
-                    "f1_macro_mean": np.mean(f1_macros),
-                    "f1_macro_std": np.std(f1_macros),
-                    "f1_weighted_mean": np.mean(f1_weighted),
-                    "f1_weighted_std": np.std(f1_weighted),
-                    "acc_mean": np.mean(accs),
-                    "acc_std": np.std(accs),
-                    "precision_macro_mean": np.mean(precision_macros),
-                    "precision_macro_std": np.std(precision_macros),
-                    "recall_macro_mean": np.mean(recall_macros),
-                    "recall_macro_std": np.std(recall_macros),
-                    "runs": len(fold_scores),
-                }
-            )
+            summary = {
+                "model": model_name,
+                "img_size": img_size,
+                "f1_macro_mean": np.mean(f1_macros),
+                "f1_macro_std": np.std(f1_macros),
+                "f1_weighted_mean": np.mean(f1_weighted),
+                "f1_weighted_std": np.std(f1_weighted),
+                "acc_mean": np.mean(accs),
+                "acc_std": np.std(accs),
+                "precision_macro_mean": np.mean(precision_macros),
+                "precision_macro_std": np.std(precision_macros),
+                "recall_macro_mean": np.mean(recall_macros),
+                "recall_macro_std": np.std(recall_macros),
+                "runs": len(fold_scores),
+            }
+            results = [
+                row
+                for row in results
+                if not (row["model"] == model_name and int(row["img_size"]) == img_size)
+            ]
+            results.append(summary)
+            _persist_partial_metrics(fold_results, results)
 
     df_folds = pd.DataFrame(fold_results)
     df_results = pd.DataFrame(results).sort_values("f1_macro_mean", ascending=False)
@@ -372,35 +452,40 @@ def main():
         best_model_name, num_classes, best_img_size, MODEL_SPECS
     )
 
-    train_two_stage(
-        model=final_model,
-        base_model=final_base,
-        train_ds=train_ds,
-        class_weight=class_weight,
-        val_ds=None,
-        checkpoint_path=None,
-    )
+    final_model_path = FINAL_MODEL_DIR / f"{best_model_name}_img{best_img_size}_final.keras"
+    holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
+    if final_model_path.exists() and holdout_metrics_path.exists():
+        print("Final stage already completed. Skipping retraining and holdout evaluation.")
+    else:
+        train_two_stage(
+            model=final_model,
+            base_model=final_base,
+            train_ds=train_ds,
+            class_weight=class_weight,
+            val_ds=None,
+            best_checkpoint_path=None,
+        )
 
-    final_model.save(FINAL_MODEL_DIR / f"{best_model_name}_img{best_img_size}_final.keras")
+        final_model.save(final_model_path)
 
-    test_metrics = evaluate_predictions(final_model, test_ds, y_test)
-    print(
-        "Holdout TEST -> "
-        f"F1-macro: {test_metrics['f1_macro']:.4f} | "
-        f"F1-weighted: {test_metrics['f1_weighted']:.4f} | "
-        f"Acc: {test_metrics['accuracy']:.4f} | "
-        f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
-        f"Recall-macro: {test_metrics['recall_macro']:.4f}"
-    )
-    pd.DataFrame(
-        [
-            {
-                "model": best_model_name,
-                "img_size": best_img_size,
-                **test_metrics,
-            }
-        ]
-    ).to_csv(RESULTS_DIR / "holdout_test_metrics.csv", index=False)
+        test_metrics = evaluate_predictions(final_model, test_ds, y_test)
+        print(
+            "Holdout TEST -> "
+            f"F1-macro: {test_metrics['f1_macro']:.4f} | "
+            f"F1-weighted: {test_metrics['f1_weighted']:.4f} | "
+            f"Acc: {test_metrics['accuracy']:.4f} | "
+            f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
+            f"Recall-macro: {test_metrics['recall_macro']:.4f}"
+        )
+        pd.DataFrame(
+            [
+                {
+                    "model": best_model_name,
+                    "img_size": best_img_size,
+                    **test_metrics,
+                }
+            ]
+        ).to_csv(holdout_metrics_path, index=False)
 
 
 if __name__ == "__main__":
