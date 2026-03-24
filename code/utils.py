@@ -100,3 +100,63 @@ def build_model(model_name, num_classes, img_size, model_specs):
         metrics=["accuracy"],
     )
     return model
+
+####################################################################
+################### AÑADIDO POR MIGUEL #############################
+####################################################################
+
+# --------- spatial pooling for CBAM architecture ----------------
+class SpatialPooling(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(SpatialPooling, self).__init__(**kwargs)
+
+    def call(self, inputs):
+        avg_pool = tf.reduce_mean(inputs, axis=-1, keepdims=True)
+        max_pool = tf.reduce_max(inputs, axis=-1, keepdims=True)
+        return tf.concat([avg_pool, max_pool], axis=-1)
+
+    def get_config(self):
+        return super().get_config()
+
+
+# ------------------------- CBAM BLOCK -------------------------
+def cbam_block(input_tensor, reduction_ratio=16):
+    channel = input_tensor.shape[-1]
+    shared_dense_one = tf.keras.layers.Dense(
+        channel // reduction_ratio,
+        activation="relu",
+        kernel_initializer="he_normal",
+        use_bias=True,
+    )
+    shared_dense_two = tf.keras.layers.Dense(
+        channel,
+        kernel_initializer="he_normal",
+        use_bias=True,
+    )
+
+    avg_pool = tf.keras.layers.GlobalAveragePooling2D()(input_tensor)
+    avg_pool = tf.keras.layers.Reshape((1, 1, channel))(avg_pool)
+    avg_pool = shared_dense_one(avg_pool)
+    avg_pool = shared_dense_two(avg_pool)
+
+    max_pool = tf.keras.layers.GlobalMaxPooling2D()(input_tensor)
+    max_pool = tf.keras.layers.Reshape((1, 1, channel))(max_pool)
+    max_pool = shared_dense_one(max_pool)
+    max_pool = shared_dense_two(max_pool)
+
+    channel_attention = tf.keras.layers.Add()([avg_pool, max_pool])
+    channel_attention = tf.keras.layers.Activation("sigmoid")(channel_attention)
+    channel_refined = tf.keras.layers.Multiply()([input_tensor, channel_attention])
+
+    concat = SpatialPooling()(channel_refined)
+    spatial_attention = tf.keras.layers.Conv2D(
+        filters=1,
+        kernel_size=7,
+        strides=1,
+        padding="same",
+        activation="sigmoid",
+        kernel_initializer="he_normal",
+        use_bias=False,
+    )(concat)
+    refined = tf.keras.layers.Multiply()([channel_refined, spatial_attention])
+    return refined
