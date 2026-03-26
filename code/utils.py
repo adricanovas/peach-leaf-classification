@@ -1,4 +1,6 @@
-from typing import Tuple
+import json
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 import cv2
 import albumentations as A
 import numpy as np
@@ -24,13 +26,14 @@ def create_augmentation_pipeline(is_training: bool = True, img_size: Tuple[int, 
 
             A.HueSaturationValue(hue_shift_limit=3, sat_shift_limit=5, val_shift_limit=4, p=0.2),
 
-            A.ShiftScaleRotate(
-                shift_limit=0.05,
-                scale_limit=0.05,
-                rotate_limit=0,
-                border_mode=cv2.BORDER_CONSTANT,
-                fill=0,
-                p=0.3
+            A.Affine(
+                translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
+                scale=(0.95, 1.05),
+                rotate=(0, 0),
+                interpolation=cv2.INTER_LINEAR,
+                mode=cv2.BORDER_CONSTANT,
+                cval=0,
+                p=0.3,
             ),
         ])
     else:
@@ -170,3 +173,32 @@ def cbam_block(input_tensor, reduction_ratio=16):
     )(concat)
     refined = tf.keras.layers.Multiply()([channel_refined, spatial_attention])
     return refined
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def write_json(path: Path, payload: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=True, indent=2)
+
+
+def build_training_progress(
+    total_steps: int,
+    done_items: List[str],
+    pending_items: List[str],
+    current_item: Optional[str] = None,
+) -> Dict:
+    done = len(done_items)
+    return {
+        "updated_at_utc": utc_now_iso(),
+        "total_steps": int(total_steps),
+        "completed_steps": int(done),
+        "pending_steps": int(max(total_steps - done, 0)),
+        "progress": f"{done}/{total_steps}",
+        "current": current_item,
+        "completed_items": done_items,
+        "pending_items": pending_items,
+    }

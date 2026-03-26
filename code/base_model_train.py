@@ -7,7 +7,13 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-from utils import build_model, load_paths_and_labels, make_dataset
+from utils import (
+    build_model,
+    build_training_progress,
+    load_paths_and_labels,
+    make_dataset,
+    write_json,
+)
 
 # =========================
 # Config
@@ -41,11 +47,13 @@ TEST_SIZE = 0.2
 IMAGE_SIZES = [192, 224]
 USE_AUGMENTATION = True
 
-ARTIFACTS_DIR = Path("artifacts")
 #ARTIFACTS_DIR = Path("artifacts")
+ARTIFACTS_DIR = Path("artifacts")
 CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 FINAL_MODEL_DIR = ARTIFACTS_DIR / "final_model"
+PROGRESS_STATE_PATH = RESULTS_DIR / "training_progress_state.json"
+HOLDOUT_ALL_MODELS_PATH = RESULTS_DIR / "holdout_test_metrics_all_models.csv"
 
 # =========================
 # Model registry
@@ -150,6 +158,59 @@ def _upsert_fold_result(fold_results, row):
     ]
     filtered.append(row)
     return filtered
+
+
+def _upsert_model_metric(rows, row):
+    filtered = [
+        item
+        for item in rows
+        if not (
+            item["model"] == row["model"]
+            and int(item["img_size"]) == int(row["img_size"])
+        )
+    ]
+    filtered.append(row)
+    return filtered
+
+
+def _load_holdout_metrics_all_models():
+    if HOLDOUT_ALL_MODELS_PATH.exists():
+        return pd.read_csv(HOLDOUT_ALL_MODELS_PATH).to_dict(orient="records")
+    return []
+
+
+def _fold_item_key(model_name, img_size, fold):
+    return f"{model_name}|img{img_size}|fold{int(fold):02d}"
+
+
+def _compute_fold_progress_state(fold_results):
+    all_items = [
+        _fold_item_key(model_name, img_size, fold)
+        for model_name in MODELS
+        for img_size in IMAGE_SIZES
+        for fold in range(1, (N_SPLITS * N_REPEATS) + 1)
+    ]
+    done_items = sorted(
+        {
+            _fold_item_key(row["model"], int(row["img_size"]), int(row["fold"]))
+            for row in fold_results
+        }
+    )
+    done_set = set(done_items)
+    pending_items = [item for item in all_items if item not in done_set]
+    return all_items, done_items, pending_items
+
+
+def _persist_progress_state(fold_results, current_item=None):
+    all_items, done_items, pending_items = _compute_fold_progress_state(fold_results)
+    state = build_training_progress(
+        total_steps=len(all_items),
+        done_items=done_items,
+        pending_items=pending_items,
+        current_item=current_item,
+    )
+    write_json(PROGRESS_STATE_PATH, state)
+    print(f"Progress: {state['progress']} | pending: {state['pending_steps']}")
 
 
 def set_finetune_layers(base_model, unfreeze_ratio):
@@ -274,6 +335,7 @@ def main():
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     fold_results, results = _load_partial_metrics()
+    _persist_progress_state(fold_results, current_item=None)
 
     for model_name in MODELS:
         _, preprocess_fn = MODEL_SPECS[model_name]
@@ -288,6 +350,7 @@ def main():
 
             fold_scores = []
             for fold, (tr_idx, va_idx) in enumerate(rkf.split(X_train, y_train), start=1):
+                fold_item = _fold_item_key(model_name, img_size, fold)
                 existing = _find_fold_result(fold_results, model_name, img_size, fold)
                 checkpoint_path = (
                     CHECKPOINTS_DIR
@@ -306,6 +369,7 @@ def main():
                             "recall_macro": float(existing["recall_macro"]),
                         }
                     )
+                    _persist_progress_state(fold_results, current_item=fold_item)
                     continue
 
                 tf.keras.backend.clear_session()
@@ -367,6 +431,7 @@ def main():
                     f"Recall-macro: {fold_metrics['recall_macro']:.4f}"
                 )
                 _persist_partial_metrics(fold_results, results)
+                _persist_progress_state(fold_results, current_item=fold_item)
 
             f1_macros = [s["f1_macro"] for s in fold_scores]
             f1_weighted = [s["f1_weighted"] for s in fold_scores]
@@ -412,6 +477,7 @@ def main():
             ]
             results.append(summary)
             _persist_partial_metrics(fold_results, results)
+            _persist_progress_state(fold_results, current_item=None)
 
     df_folds = pd.DataFrame(fold_results)
     df_results = pd.DataFrame(results).sort_values("f1_macro_mean", ascending=False)
@@ -420,49 +486,61 @@ def main():
     df_folds.to_csv(RESULTS_DIR / "cv_fold_metrics.csv", index=False)
     df_results.to_csv(RESULTS_DIR / "cv_ranking.csv", index=False)
 
-    best_model_name = df_results.iloc[0]["model"]
-    best_img_size = int(df_results.iloc[0]["img_size"])
-    _, best_preprocess_fn = MODEL_SPECS[best_model_name]
-    print(
-        f"\n=== Final model selected from CV: {best_model_name} | img_size={best_img_size} ==="
-    )
-
-    tf.keras.backend.clear_session()
-    tf.keras.utils.set_random_seed(BASE_SEED)
-
-    train_ds = make_dataset(
-        X_train,
-        y_train,
-        best_img_size,
-        best_preprocess_fn,
-        BATCH_SIZE,
-        training=True,
-        use_augmentation=USE_AUGMENTATION,
-    )
-    test_ds = make_dataset(
-        X_test, y_test, best_img_size, best_preprocess_fn, BATCH_SIZE, training=False
-    )
-
     class_weight = get_class_weight(y_train, num_classes)
-    final_model, final_base = build_model(
-        best_model_name, num_classes, best_img_size, MODEL_SPECS
-    )
+    holdout_all = _load_holdout_metrics_all_models()
 
-    final_model_path = FINAL_MODEL_DIR / f"{best_model_name}_img{best_img_size}_final.keras"
-    holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
-    if final_model_path.exists() and holdout_metrics_path.exists():
-        print("Final stage already completed. Skipping retraining and holdout evaluation.")
-    else:
-        train_two_stage(
-            model=final_model,
-            base_model=final_base,
-            train_ds=train_ds,
-            class_weight=class_weight,
-            val_ds=None,
-            best_checkpoint_path=None,
+    for row in df_results.to_dict(orient="records"):
+        model_name = row["model"]
+        img_size = int(row["img_size"])
+        _, preprocess_fn = MODEL_SPECS[model_name]
+        final_model_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
+        existing_holdout = next(
+            (
+                item
+                for item in holdout_all
+                if item["model"] == model_name and int(item["img_size"]) == img_size
+            ),
+            None,
         )
 
-        final_model.save(final_model_path)
+        print(f"\n=== Final full-train: {model_name} | img_size={img_size} ===")
+
+        if final_model_path.exists() and existing_holdout is not None:
+            print("Final model and holdout metrics already exist. Skipping.")
+            continue
+
+        tf.keras.backend.clear_session()
+        tf.keras.utils.set_random_seed(BASE_SEED)
+
+        train_ds = make_dataset(
+            X_train,
+            y_train,
+            img_size,
+            preprocess_fn,
+            BATCH_SIZE,
+            training=True,
+            use_augmentation=USE_AUGMENTATION,
+        )
+        test_ds = make_dataset(
+            X_test, y_test, img_size, preprocess_fn, BATCH_SIZE, training=False
+        )
+
+        if final_model_path.exists():
+            print("Loading existing final model to compute missing holdout metrics.")
+            final_model = tf.keras.models.load_model(final_model_path)
+        else:
+            final_model, final_base = build_model(
+                model_name, num_classes, img_size, MODEL_SPECS
+            )
+            train_two_stage(
+                model=final_model,
+                base_model=final_base,
+                train_ds=train_ds,
+                class_weight=class_weight,
+                val_ds=None,
+                best_checkpoint_path=None,
+            )
+            final_model.save(final_model_path)
 
         test_metrics = evaluate_predictions(final_model, test_ds, y_test)
         print(
@@ -473,15 +551,31 @@ def main():
             f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
             f"Recall-macro: {test_metrics['recall_macro']:.4f}"
         )
-        pd.DataFrame(
-            [
-                {
-                    "model": best_model_name,
-                    "img_size": best_img_size,
-                    **test_metrics,
-                }
-            ]
-        ).to_csv(holdout_metrics_path, index=False)
+        holdout_all = _upsert_model_metric(
+            holdout_all,
+            {
+                "model": model_name,
+                "img_size": img_size,
+                **test_metrics,
+            },
+        )
+        pd.DataFrame(holdout_all).to_csv(HOLDOUT_ALL_MODELS_PATH, index=False)
+
+    holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
+    if holdout_all:
+        best_model_name = df_results.iloc[0]["model"]
+        best_img_size = int(df_results.iloc[0]["img_size"])
+        best_holdout = next(
+            (
+                item
+                for item in holdout_all
+                if item["model"] == best_model_name
+                and int(item["img_size"]) == best_img_size
+            ),
+            None,
+        )
+        if best_holdout is not None:
+            pd.DataFrame([best_holdout]).to_csv(holdout_metrics_path, index=False)
 
 
 if __name__ == "__main__":
