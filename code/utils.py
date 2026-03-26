@@ -54,7 +54,15 @@ def load_paths_and_labels(data_dir: Path):
     return np.array(paths), np.array(labels), class_names
 
 
-def make_dataset(paths, labels, img_size, preprocess_fn, batch_size=32, training=False):
+def make_dataset(
+    paths,
+    labels,
+    img_size,
+    preprocess_fn,
+    batch_size=32,
+    training=False,
+    use_augmentation=False,
+):
     paths = tf.convert_to_tensor(paths, dtype=tf.string)
     labels = tf.convert_to_tensor(labels, dtype=tf.int32)
     num_classes = tf.reduce_max(labels) + 1
@@ -64,9 +72,24 @@ def make_dataset(paths, labels, img_size, preprocess_fn, batch_size=32, training
     if training:
         ds = ds.shuffle(buffer_size=len(paths), reshuffle_each_iteration=True)
 
+    augmenter = (
+        create_augmentation_pipeline(is_training=True, img_size=(img_size, img_size))
+        if training and use_augmentation
+        else None
+    )
+
+    def _augment_image(img):
+        aug = augmenter(image=img.numpy())
+        return aug["image"].astype(np.uint8)
+
     def _load(path, y):
         img = tf.io.read_file(path)
         img = tf.image.decode_image(img, channels=3, expand_animations=False)
+
+        if augmenter is not None:
+            img = tf.py_function(_augment_image, [img], Tout=tf.uint8)
+            img.set_shape([None, None, 3])
+
         img = tf.image.resize(img, (img_size, img_size))
         img = tf.cast(img, tf.float32)
         img = preprocess_fn(img)
@@ -79,7 +102,7 @@ def make_dataset(paths, labels, img_size, preprocess_fn, batch_size=32, training
 
 
 def build_model(model_name, num_classes, img_size, model_specs):
-    base_cls, _, _ = model_specs[model_name]
+    base_cls, _ = model_specs[model_name]
     base = base_cls(
         include_top=False,
         weights="imagenet",
@@ -93,19 +116,8 @@ def build_model(model_name, num_classes, img_size, model_specs):
     x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
     model = tf.keras.Model(inputs, outputs)
+    return model, base
 
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(1e-3),
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    return model
-
-####################################################################
-################### AÑADIDO POR MIGUEL #############################
-####################################################################
-
-# --------- spatial pooling for CBAM architecture ----------------
 class SpatialPooling(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         super(SpatialPooling, self).__init__(**kwargs)
@@ -118,8 +130,6 @@ class SpatialPooling(tf.keras.layers.Layer):
     def get_config(self):
         return super().get_config()
 
-
-# ------------------------- CBAM BLOCK -------------------------
 def cbam_block(input_tensor, reduction_ratio=16):
     channel = input_tensor.shape[-1]
     shared_dense_one = tf.keras.layers.Dense(

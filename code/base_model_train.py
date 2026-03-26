@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-from utils import load_paths_and_labels, make_dataset
+from utils import build_model, load_paths_and_labels, make_dataset
 
 # =========================
 # Config
@@ -35,12 +35,14 @@ UNFREEZE_RATIO = 0.3
 
 N_SPLITS = 5
 N_REPEATS = 3
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 BASE_SEED = 5681
 TEST_SIZE = 0.2
-IMAGE_SIZES = [192, 224, 320]
+IMAGE_SIZES = [192, 224]
+USE_AUGMENTATION = True
 
 ARTIFACTS_DIR = Path("artifacts")
+#ARTIFACTS_DIR = Path("artifacts")
 CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 FINAL_MODEL_DIR = ARTIFACTS_DIR / "final_model"
@@ -148,24 +150,6 @@ def _upsert_fold_result(fold_results, row):
     ]
     filtered.append(row)
     return filtered
-
-
-def build_model_with_base(model_name, num_classes, img_size, model_specs):
-    base_cls, _ = model_specs[model_name]
-    base = base_cls(
-        include_top=False,
-        weights="imagenet",
-        input_shape=(img_size, img_size, 3),
-    )
-    base.trainable = False
-
-    inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = base(inputs, training=False)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
-    model = tf.keras.Model(inputs, outputs)
-    return model, base
 
 
 def set_finetune_layers(base_model, unfreeze_ratio):
@@ -331,14 +315,20 @@ def main():
                 X_va, y_va = X_train[va_idx], y_train[va_idx]
 
                 train_ds = make_dataset(
-                    X_tr, y_tr, img_size, preprocess_fn, BATCH_SIZE, training=True
+                    X_tr,
+                    y_tr,
+                    img_size,
+                    preprocess_fn,
+                    BATCH_SIZE,
+                    training=True,
+                    use_augmentation=USE_AUGMENTATION,
                 )
                 val_ds = make_dataset(
                     X_va, y_va, img_size, preprocess_fn, BATCH_SIZE, training=False
                 )
 
                 class_weight = get_class_weight(y_tr, num_classes)
-                model, base = build_model_with_base(
+                model, base = build_model(
                     model_name, num_classes, img_size, MODEL_SPECS
                 )
                 if checkpoint_path.exists():
@@ -441,14 +431,20 @@ def main():
     tf.keras.utils.set_random_seed(BASE_SEED)
 
     train_ds = make_dataset(
-        X_train, y_train, best_img_size, best_preprocess_fn, BATCH_SIZE, training=True
+        X_train,
+        y_train,
+        best_img_size,
+        best_preprocess_fn,
+        BATCH_SIZE,
+        training=True,
+        use_augmentation=USE_AUGMENTATION,
     )
     test_ds = make_dataset(
         X_test, y_test, best_img_size, best_preprocess_fn, BATCH_SIZE, training=False
     )
 
     class_weight = get_class_weight(y_train, num_classes)
-    final_model, final_base = build_model_with_base(
+    final_model, final_base = build_model(
         best_model_name, num_classes, best_img_size, MODEL_SPECS
     )
 
