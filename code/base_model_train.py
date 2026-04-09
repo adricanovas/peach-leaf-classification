@@ -179,6 +179,24 @@ def _load_holdout_metrics_all_models():
     return []
 
 
+def _try_load_fold_checkpoint(model, checkpoint_path):
+    try:
+        model.load_weights(checkpoint_path)
+        return True
+    except (OSError, ValueError, tf.errors.OpError) as exc:
+        print(
+            f"[WARN] Failed to load checkpoint {checkpoint_path.name}: {exc}. "
+            "Deleting it and retraining the fold."
+        )
+        try:
+            checkpoint_path.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            print(
+                f"[WARN] Could not delete corrupt checkpoint {checkpoint_path.name}: {unlink_exc}"
+            )
+        return False
+
+
 def _fold_item_key(model_name, img_size, fold):
     return f"{model_name}|img{img_size}|fold{int(fold):02d}"
 
@@ -395,12 +413,14 @@ def main():
                 model, base = build_model(
                     model_name, num_classes, img_size, MODEL_SPECS
                 )
+                should_train_fold = True
                 if checkpoint_path.exists():
                     print(
                         f"Skipping training for fold with existing checkpoint: {checkpoint_path.name}"
                     )
-                    model.load_weights(checkpoint_path)
-                else:
+                    should_train_fold = not _try_load_fold_checkpoint(model, checkpoint_path)
+
+                if should_train_fold:
                     train_two_stage(
                         model=model,
                         base_model=base,
