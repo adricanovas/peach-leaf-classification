@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -332,6 +333,92 @@ def evaluate_predictions(model, dataset, y_true):
     }
 
 
+def _ensure_final_model_and_holdout(
+    model_name,
+    img_size,
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    num_classes,
+    class_weight,
+    holdout_all,
+):
+    _, preprocess_fn = MODEL_SPECS[model_name]
+    final_model_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
+    existing_holdout = next(
+        (
+            item
+            for item in holdout_all
+            if item["model"] == model_name and int(item["img_size"]) == int(img_size)
+        ),
+        None,
+    )
+
+    print(f"\n=== Final full-train: {model_name} | img_size={img_size} ===")
+
+    if final_model_path.exists() and existing_holdout is not None:
+        print("Final model and holdout metrics already exist. Skipping.")
+        return holdout_all
+
+    tf.keras.backend.clear_session()
+    tf.keras.utils.set_random_seed(BASE_SEED)
+
+    train_ds = make_dataset(
+        X_train,
+        y_train,
+        img_size,
+        preprocess_fn,
+        BATCH_SIZE,
+        training=True,
+        use_augmentation=USE_AUGMENTATION,
+    )
+    test_ds = make_dataset(
+        X_test,
+        y_test,
+        img_size,
+        preprocess_fn,
+        BATCH_SIZE,
+        training=False,
+    )
+
+    if final_model_path.exists():
+        print("Loading existing final model to compute missing holdout metrics.")
+        final_model = tf.keras.models.load_model(final_model_path)
+    else:
+        final_model, final_base = build_model(model_name, num_classes, img_size, MODEL_SPECS)
+        train_two_stage(
+            model=final_model,
+            base_model=final_base,
+            train_ds=train_ds,
+            class_weight=class_weight,
+            val_ds=None,
+            best_checkpoint_path=None,
+        )
+        final_model.save(final_model_path)
+        print(f"Saved final model: {final_model_path}")
+
+    test_metrics = evaluate_predictions(final_model, test_ds, y_test)
+    print(
+        "Holdout TEST -> "
+        f"F1-macro: {test_metrics['f1_macro']:.4f} | "
+        f"F1-weighted: {test_metrics['f1_weighted']:.4f} | "
+        f"Acc: {test_metrics['accuracy']:.4f} | "
+        f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
+        f"Recall-macro: {test_metrics['recall_macro']:.4f}"
+    )
+    holdout_all = _upsert_model_metric(
+        holdout_all,
+        {
+            "model": model_name,
+            "img_size": int(img_size),
+            **test_metrics,
+        },
+    )
+    pd.DataFrame(holdout_all).to_csv(HOLDOUT_ALL_MODELS_PATH, index=False)
+    return holdout_all
+
+
 def main():
     X, y, class_names = load_paths_and_labels(DATA_DIR)
     num_classes = len(class_names)
@@ -353,6 +440,8 @@ def main():
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     fold_results, results = _load_partial_metrics()
+    full_train_class_weight = get_class_weight(y_train, num_classes)
+    holdout_all = _load_holdout_metrics_all_models()
     _persist_progress_state(fold_results, current_item=None)
 
     for model_name in MODELS:
@@ -409,7 +498,7 @@ def main():
                     X_va, y_va, img_size, preprocess_fn, BATCH_SIZE, training=False
                 )
 
-                class_weight = get_class_weight(y_tr, num_classes)
+                fold_class_weight = get_class_weight(y_tr, num_classes)
                 model, base = build_model(
                     model_name, num_classes, img_size, MODEL_SPECS
                 )
@@ -425,7 +514,7 @@ def main():
                         model=model,
                         base_model=base,
                         train_ds=train_ds,
-                        class_weight=class_weight,
+                        class_weight=fold_class_weight,
                         val_ds=val_ds,
                         best_checkpoint_path=checkpoint_path,
                     )
@@ -498,6 +587,17 @@ def main():
             results.append(summary)
             _persist_partial_metrics(fold_results, results)
             _persist_progress_state(fold_results, current_item=None)
+            holdout_all = _ensure_final_model_and_holdout(
+                model_name=model_name,
+                img_size=img_size,
+                X_train=X_train,
+                y_train=y_train,
+                X_test=X_test,
+                y_test=y_test,
+                num_classes=num_classes,
+                class_weight=full_train_class_weight,
+                holdout_all=holdout_all,
+            )
 
     df_folds = pd.DataFrame(fold_results)
     df_results = pd.DataFrame(results).sort_values("f1_macro_mean", ascending=False)
@@ -506,80 +606,20 @@ def main():
     df_folds.to_csv(RESULTS_DIR / "cv_fold_metrics.csv", index=False)
     df_results.to_csv(RESULTS_DIR / "cv_ranking.csv", index=False)
 
-    class_weight = get_class_weight(y_train, num_classes)
-    holdout_all = _load_holdout_metrics_all_models()
-
     for row in df_results.to_dict(orient="records"):
         model_name = row["model"]
         img_size = int(row["img_size"])
-        _, preprocess_fn = MODEL_SPECS[model_name]
-        final_model_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
-        existing_holdout = next(
-            (
-                item
-                for item in holdout_all
-                if item["model"] == model_name and int(item["img_size"]) == img_size
-            ),
-            None,
+        holdout_all = _ensure_final_model_and_holdout(
+            model_name=model_name,
+            img_size=img_size,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            num_classes=num_classes,
+            class_weight=full_train_class_weight,
+            holdout_all=holdout_all,
         )
-
-        print(f"\n=== Final full-train: {model_name} | img_size={img_size} ===")
-
-        if final_model_path.exists() and existing_holdout is not None:
-            print("Final model and holdout metrics already exist. Skipping.")
-            continue
-
-        tf.keras.backend.clear_session()
-        tf.keras.utils.set_random_seed(BASE_SEED)
-
-        train_ds = make_dataset(
-            X_train,
-            y_train,
-            img_size,
-            preprocess_fn,
-            BATCH_SIZE,
-            training=True,
-            use_augmentation=USE_AUGMENTATION,
-        )
-        test_ds = make_dataset(
-            X_test, y_test, img_size, preprocess_fn, BATCH_SIZE, training=False
-        )
-
-        if final_model_path.exists():
-            print("Loading existing final model to compute missing holdout metrics.")
-            final_model = tf.keras.models.load_model(final_model_path)
-        else:
-            final_model, final_base = build_model(
-                model_name, num_classes, img_size, MODEL_SPECS
-            )
-            train_two_stage(
-                model=final_model,
-                base_model=final_base,
-                train_ds=train_ds,
-                class_weight=class_weight,
-                val_ds=None,
-                best_checkpoint_path=None,
-            )
-            final_model.save(final_model_path)
-
-        test_metrics = evaluate_predictions(final_model, test_ds, y_test)
-        print(
-            "Holdout TEST -> "
-            f"F1-macro: {test_metrics['f1_macro']:.4f} | "
-            f"F1-weighted: {test_metrics['f1_weighted']:.4f} | "
-            f"Acc: {test_metrics['accuracy']:.4f} | "
-            f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
-            f"Recall-macro: {test_metrics['recall_macro']:.4f}"
-        )
-        holdout_all = _upsert_model_metric(
-            holdout_all,
-            {
-                "model": model_name,
-                "img_size": img_size,
-                **test_metrics,
-            },
-        )
-        pd.DataFrame(holdout_all).to_csv(HOLDOUT_ALL_MODELS_PATH, index=False)
 
     holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
     if holdout_all:
@@ -596,6 +636,38 @@ def main():
         )
         if best_holdout is not None:
             pd.DataFrame([best_holdout]).to_csv(holdout_metrics_path, index=False)
+
+    best_per_arch_rows = []
+    for row in (
+        df_results.sort_values("f1_macro_mean", ascending=False)
+        .groupby("model", as_index=False)
+        .head(1)
+        .to_dict(orient="records")
+    ):
+        model_name = row["model"]
+        img_size = int(row["img_size"])
+        src_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
+        dst_path = FINAL_MODEL_DIR / f"{model_name}_best_final.keras"
+        if not src_path.exists():
+            print(
+                f"[WARN] Best candidate missing on disk, skipping best alias: {src_path.name}"
+            )
+            continue
+        shutil.copy2(src_path, dst_path)
+        best_per_arch_rows.append(
+            {
+                "model": model_name,
+                "best_img_size": img_size,
+                "f1_macro_mean": float(row["f1_macro_mean"]),
+                "source_model_path": str(src_path),
+                "best_model_path": str(dst_path),
+            }
+        )
+
+    if best_per_arch_rows:
+        pd.DataFrame(best_per_arch_rows).sort_values(
+            "f1_macro_mean", ascending=False
+        ).to_csv(RESULTS_DIR / "best_model_per_architecture.csv", index=False)
 
 
 if __name__ == "__main__":
