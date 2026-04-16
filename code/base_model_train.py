@@ -321,15 +321,22 @@ def train_two_stage(
     )
 
 
-def evaluate_predictions(model, dataset, y_true):
+def evaluate_predictions(model, dataset, y_true, class_names=None):
     y_prob = model.predict(dataset, verbose=0)
     y_pred = np.argmax(y_prob, axis=1)
+    # per-class metrics
+    precision_per = precision_score(y_true, y_pred, average=None, zero_division=0)
+    recall_per = recall_score(y_true, y_pred, average=None, zero_division=0)
+    f1_per = f1_score(y_true, y_pred, average=None)
     return {
         "f1_macro": f1_score(y_true, y_pred, average="macro"),
         "f1_weighted": f1_score(y_true, y_pred, average="weighted"),
         "accuracy": accuracy_score(y_true, y_pred),
         "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
         "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "precision_per_class": precision_per.tolist(),
+        "recall_per_class": recall_per.tolist(),
+        "f1_per_class": f1_per.tolist(),
     }
 
 
@@ -342,7 +349,8 @@ def _ensure_final_model_and_holdout(
     y_test,
     num_classes,
     class_weight,
-    holdout_all,
+    class_names=None,
+    holdout_all=None,
 ):
     _, preprocess_fn = MODEL_SPECS[model_name]
     final_model_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
@@ -398,7 +406,7 @@ def _ensure_final_model_and_holdout(
         final_model.save(final_model_path)
         print(f"Saved final model: {final_model_path}")
 
-    test_metrics = evaluate_predictions(final_model, test_ds, y_test)
+    test_metrics = evaluate_predictions(final_model, test_ds, y_test, class_names=class_names)
     print(
         "Holdout TEST -> "
         f"F1-macro: {test_metrics['f1_macro']:.4f} | "
@@ -407,6 +415,13 @@ def _ensure_final_model_and_holdout(
         f"Prec-macro: {test_metrics['precision_macro']:.4f} | "
         f"Recall-macro: {test_metrics['recall_macro']:.4f}"
     )
+    if "f1_per_class" in test_metrics and class_names is not None:
+        per_lines = []
+        for i, cname in enumerate(class_names):
+            per_lines.append(
+                f"{cname}: F1={test_metrics['f1_per_class'][i]:.4f} | P={test_metrics['precision_per_class'][i]:.4f} | R={test_metrics['recall_per_class'][i]:.4f}"
+            )
+        print("  Holdout Per-class -> " + " | ".join(per_lines))
     holdout_all = _upsert_model_metric(
         holdout_all,
         {
@@ -519,7 +534,7 @@ def main():
                         best_checkpoint_path=checkpoint_path,
                     )
 
-                fold_metrics = evaluate_predictions(model, val_ds, y_va)
+                fold_metrics = evaluate_predictions(model, val_ds, y_va, class_names=class_names)
                 fold_scores.append(fold_metrics)
                 fold_results = _upsert_fold_result(
                     fold_results,
@@ -539,6 +554,14 @@ def main():
                     f"Prec-macro: {fold_metrics['precision_macro']:.4f} | "
                     f"Recall-macro: {fold_metrics['recall_macro']:.4f}"
                 )
+                # Per-class metrics (show name if available)
+                if "f1_per_class" in fold_metrics and class_names is not None:
+                    per_lines = []
+                    for i, cname in enumerate(class_names):
+                        per_lines.append(
+                            f"{cname}: F1={fold_metrics['f1_per_class'][i]:.4f} | P={fold_metrics['precision_per_class'][i]:.4f} | R={fold_metrics['recall_per_class'][i]:.4f}"
+                        )
+                    print("  Per-class -> " + " | ".join(per_lines))
                 _persist_partial_metrics(fold_results, results)
                 _persist_progress_state(fold_results, current_item=fold_item)
 
@@ -596,6 +619,7 @@ def main():
                 y_test=y_test,
                 num_classes=num_classes,
                 class_weight=full_train_class_weight,
+                class_names=class_names,
                 holdout_all=holdout_all,
             )
 

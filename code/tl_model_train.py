@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import numpy as np
 import pandas as pd
@@ -36,12 +37,16 @@ BASE_SEED = 5681
 
 TL_EPOCHS = 15
 TL_LR = 1e-4
+# Linear probe (used to estimate 'before' performance when class mismatch)
+PROBE_EPOCHS = 5
+PROBE_LR = 1e-3
 LAST_N_LAYERS = 20
 FREEZE_BATCHNORM = True
 USE_AUGMENTATION = True
 
 # Rutas de modelos entrenados por base_model_train.py
-BASE_ARTIFACTS_DIR = Path("artifacts")
+# Allow overriding the artifacts root via ARTIFACTS_DIR env var (defaults to 'artifacts')
+BASE_ARTIFACTS_DIR = Path(os.environ.get("ARTIFACTS_DIR", "artifacts"))
 BASE_FINAL_MODEL_DIR = BASE_ARTIFACTS_DIR / "final_model"
 
 # Artefactos específicos para transfer learning
@@ -303,13 +308,6 @@ def main():
 
             source_head_units = int(base_model.output_shape[-1])
             is_same_num_classes = source_head_units == num_classes
-            if not is_same_num_classes:
-                print(
-                    f"Class mismatch for {model_name}|img{img_size}: "
-                    f"source={source_head_units}, target={num_classes}. "
-                    "Rebuilding classification head for target classes."
-                )
-                base_model = _rebuild_model_for_target_classes(base_model, num_classes)
 
             train_ds = make_dataset(
                 X_train,
@@ -346,26 +344,54 @@ def main():
                     f"Acc: {before_metrics['accuracy']:.4f}"
                 )
             else:
-                before_metrics = {
-                    "f1_macro": np.nan,
-                    "f1_weighted": np.nan,
-                    "accuracy": np.nan,
-                    "precision_macro": np.nan,
-                    "recall_macro": np.nan,
-                }
                 print(
-                    "Before TL (target test) skipped: classifier head replaced due to class mismatch."
+                    f"Class mismatch for {model_name}|img{img_size}: "
+                    f"source={source_head_units}, target={num_classes}. "
+                    "Creating linear probe (train head only) to estimate 'before' performance."
+                )
+                # Create probe model: clone base, rebuild head to target classes, freeze backbone and train only head for a few epochs
+                probe_base = tf.keras.models.clone_model(base_model)
+                probe_base.set_weights(base_model.get_weights())
+                probe_model = _rebuild_model_for_target_classes(probe_base, num_classes)
+                try:
+                    backbone = _find_backbone(probe_model)
+                    backbone.trainable = False
+                except Exception:
+                    # best-effort: if backbone not found, try freezing all layers except last
+                    for layer in probe_model.layers[:-1]:
+                        layer.trainable = False
+
+                probe_checkpoint = TL_CHECKPOINTS_DIR / f"{model_name}_img{img_size}_probe.weights.h5"
+                probe_callbacks = [
+                    tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+                    tf.keras.callbacks.ModelCheckpoint(filepath=str(probe_checkpoint), save_best_only=True, save_weights_only=True, verbose=0),
+                ]
+                probe_model.compile(optimizer=tf.keras.optimizers.Adam(PROBE_LR), loss="categorical_crossentropy", metrics=["accuracy"])                
+                probe_model.fit(train_ds, validation_data=val_ds, epochs=PROBE_EPOCHS, class_weight=get_class_weight(y_train, num_classes), callbacks=probe_callbacks, verbose=1)
+
+                before_metrics = evaluate_predictions(probe_model, test_ds, y_test)
+                print(
+                    "Before TL (probe) -> "
+                    f"F1-macro: {before_metrics['f1_macro']:.4f} | "
+                    f"F1-weighted: {before_metrics['f1_weighted']:.4f} | "
+                    f"Acc: {before_metrics['accuracy']:.4f}"
                 )
 
             class_weight = get_class_weight(y_train, num_classes)
+
+            # Prepare base model for TL: if needed rebuild head for target classes (use a clone so original base remains untouched)
+            base_for_tl = tf.keras.models.clone_model(base_model)
+            base_for_tl.set_weights(base_model.get_weights())
+            if not is_same_num_classes:
+                base_for_tl = _rebuild_model_for_target_classes(base_for_tl, num_classes)
 
             for strategy in STRATEGIES:
                 print(f"\n--- Strategy: {strategy} ---")
                 tf.keras.backend.clear_session()
                 tf.keras.utils.set_random_seed(BASE_SEED)
 
-                model_ft = tf.keras.models.clone_model(base_model)
-                model_ft.set_weights(base_model.get_weights())
+                model_ft = tf.keras.models.clone_model(base_for_tl)
+                model_ft.set_weights(base_for_tl.get_weights())
                 model_ft = apply_fine_tuning_strategy(model_ft, strategy)
 
                 checkpoint_path = (

@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import numpy as np
 import pandas as pd
@@ -36,14 +37,22 @@ BASE_SEED = 5681
 
 TL_EPOCHS = 15
 TL_LR = 1e-4
+# Linear probe settings to estimate 'before' when class counts differ
+PROBE_EPOCHS = 5
+PROBE_LR = 1e-3
 LAST_N_LAYERS = 20
 FREEZE_BATCHNORM = True
 USE_AUGMENTATION = True
 
-CBAM_ARTIFACTS_DIR = Path("artifacts_cbam")
+# Try to pick up CBAM-trained models from a CBAM-specific artifacts dir,
+# but fall back to a shared 'artifacts' directory so base models placed in
+# artifacts/final_model are picked up as requested.
+CBAM_ARTIFACTS_DIR = Path(os.environ.get("CBAM_ARTIFACTS_DIR", "artifacts_cbam"))
 CBAM_FINAL_MODEL_DIR = CBAM_ARTIFACTS_DIR / "final_model"
+# General artifacts fallback (where base models are expected to live)
+GENERAL_ARTIFACTS_FINAL = Path(os.environ.get("ARTIFACTS_DIR", "artifacts")) / "final_model"
 
-CBAM_TL_ARTIFACTS_DIR = Path("artifacts_cbam_tl")
+CBAM_TL_ARTIFACTS_DIR = Path(os.environ.get("CBAM_TL_ARTIFACTS_DIR", "artifacts_cbam_tl"))
 CBAM_TL_CHECKPOINTS_DIR = CBAM_TL_ARTIFACTS_DIR / "checkpoints"
 CBAM_TL_FINAL_MODEL_DIR = CBAM_TL_ARTIFACTS_DIR / "final_model"
 CBAM_TL_RESULTS_DIR = CBAM_TL_ARTIFACTS_DIR / "results"
@@ -231,21 +240,32 @@ def _rebuild_model_for_target_classes(model, num_classes):
 
 
 def _load_cbam_base_model(model_name, img_size):
-    exact_path = CBAM_FINAL_MODEL_DIR / f"{model_name}_cbam_img{img_size}_final.keras"
-    if exact_path.exists():
-        model = tf.keras.models.load_model(
-            exact_path, compile=False, custom_objects=_custom_objects()
-        )
-        return model, exact_path
+    # Prefer CBAM-specific final model location
+    candidates = [
+        CBAM_FINAL_MODEL_DIR / f"{model_name}_cbam_img{img_size}_final.keras",
+        CBAM_FINAL_MODEL_DIR / f"{model_name}_cbam_best_final.keras",
+    ]
 
-    best_path = CBAM_FINAL_MODEL_DIR / f"{model_name}_cbam_best_final.keras"
-    if best_path.exists():
-        model = tf.keras.models.load_model(
-            best_path, compile=False, custom_objects=_custom_objects()
-        )
-        return model, best_path
+    # Also look in the shared artifacts/final_model location (non-CBAM naming)
+    candidates += [
+        GENERAL_ARTIFACTS_FINAL / f"{model_name}_cbam_img{img_size}_final.keras",
+        GENERAL_ARTIFACTS_FINAL / f"{model_name}_cbam_best_final.keras",
+        GENERAL_ARTIFACTS_FINAL / f"{model_name}_img{img_size}_final.keras",
+        GENERAL_ARTIFACTS_FINAL / f"{model_name}_best_final.keras",
+    ]
 
-    return None, exact_path
+    for path in candidates:
+        if path.exists():
+            try:
+                # Try loading with CBAM custom objects first (safe if model has SpatialPooling)
+                model = tf.keras.models.load_model(path, compile=False, custom_objects=_custom_objects())
+            except Exception:
+                # Fallback to loading without custom objects (works for regular models)
+                model = tf.keras.models.load_model(path, compile=False)
+            return model, path
+
+    # Not found
+    return None, candidates[0]
 
 
 def _upsert_result(rows, row):
@@ -309,13 +329,6 @@ def main():
 
             source_head_units = int(base_model.output_shape[-1])
             is_same_num_classes = source_head_units == num_classes
-            if not is_same_num_classes:
-                print(
-                    f"Class mismatch for {model_name_with_tag}|img{img_size}: "
-                    f"source={source_head_units}, target={num_classes}. "
-                    "Rebuilding classification head for target classes."
-                )
-                base_model = _rebuild_model_for_target_classes(base_model, num_classes)
 
             train_ds = make_dataset(
                 X_train,
@@ -352,16 +365,43 @@ def main():
                     f"Acc: {before_metrics['accuracy']:.4f}"
                 )
             else:
-                before_metrics = {
-                    "f1_macro": np.nan,
-                    "f1_weighted": np.nan,
-                    "accuracy": np.nan,
-                    "precision_macro": np.nan,
-                    "recall_macro": np.nan,
-                }
                 print(
-                    "Before TL (target test) skipped: classifier head replaced due to class mismatch."
+                    f"Class mismatch for {model_name_with_tag}|img{img_size}: "
+                    f"source={source_head_units}, target={num_classes}. "
+                    "Creating linear probe (train head only) to estimate 'before' performance."
                 )
+                # Create probe model from base backbone, train only the new head for a few epochs
+                probe_base = tf.keras.models.clone_model(base_model)
+                probe_base.set_weights(base_model.get_weights())
+                probe_model = _rebuild_model_for_target_classes(probe_base, num_classes)
+                try:
+                    backbone = _find_backbone(probe_model)
+                    backbone.trainable = False
+                except Exception:
+                    for layer in probe_model.layers[:-1]:
+                        layer.trainable = False
+
+                probe_checkpoint = CBAM_TL_CHECKPOINTS_DIR / f"{model_name_with_tag}_img{img_size}_probe.weights.h5"
+                probe_callbacks = [
+                    tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+                    tf.keras.callbacks.ModelCheckpoint(filepath=str(probe_checkpoint), save_best_only=True, save_weights_only=True, verbose=0),
+                ]
+                probe_model.compile(optimizer=tf.keras.optimizers.Adam(PROBE_LR), loss="categorical_crossentropy", metrics=["accuracy"])                
+                probe_model.fit(train_ds, validation_data=val_ds, epochs=PROBE_EPOCHS, class_weight=get_class_weight(y_train, num_classes), callbacks=probe_callbacks, verbose=1)
+
+                before_metrics = evaluate_predictions(probe_model, test_ds, y_test)
+                print(
+                    "Before TL (probe) -> "
+                    f"F1-macro: {before_metrics['f1_macro']:.4f} | "
+                    f"F1-weighted: {before_metrics['f1_weighted']:.4f} | "
+                    f"Acc: {before_metrics['accuracy']:.4f}"
+                )
+
+            # Prepare base model for TL (use a clone so original base remains untouched)
+            base_for_tl = tf.keras.models.clone_model(base_model)
+            base_for_tl.set_weights(base_model.get_weights())
+            if not is_same_num_classes:
+                base_for_tl = _rebuild_model_for_target_classes(base_for_tl, num_classes)
 
             class_weight = get_class_weight(y_train, num_classes)
 
@@ -370,8 +410,8 @@ def main():
                 tf.keras.backend.clear_session()
                 tf.keras.utils.set_random_seed(BASE_SEED)
 
-                model_ft = tf.keras.models.clone_model(base_model)
-                model_ft.set_weights(base_model.get_weights())
+                model_ft = tf.keras.models.clone_model(base_for_tl)
+                model_ft.set_weights(base_for_tl.get_weights())
                 model_ft = apply_fine_tuning_strategy(model_ft, strategy)
 
                 checkpoint_path = (
