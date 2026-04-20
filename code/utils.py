@@ -6,7 +6,9 @@ import albumentations as A
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def create_augmentation_pipeline(is_training: bool = True, img_size: Tuple[int, int] = (224, 224)) -> A.Compose:
     if is_training:
@@ -202,3 +204,33 @@ def build_training_progress(
         "completed_items": done_items,
         "pending_items": pending_items,
     }
+
+
+def plot_and_save_confusion_matrix(y_true, y_pred, class_names, backbone_name, out_dir):
+    """Genera y guarda la matriz de confusión (mismo formato que en el paper)."""
+    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
+    
+    # intensidad de color relativa a la cantidad de muestras por clase
+    cm_color = cm.astype(np.float32) / cm.sum(axis=1, keepdims=True)
+    cm_color = np.nan_to_num(cm_color)
+
+    plt.figure(figsize=(8, 6))
+
+    sns.heatmap(
+        cm_color,           
+        annot=cm,          
+        fmt="d",
+        cmap="Blues",
+        xticklabels=class_names,
+        yticklabels=class_names,
+        vmin=0, vmax=1
+    )
+
+    plt.xlabel("Predicted")
+    plt.ylabel("Real")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+
+    out_path = out_dir / f"confusion_matrix_{backbone_name}.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
