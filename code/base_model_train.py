@@ -13,6 +13,7 @@ from utils import (
     build_training_progress,
     load_paths_and_labels,
     make_dataset,
+    plot_and_save_confusion_matrix,
     write_json,
 )
 
@@ -53,6 +54,7 @@ ARTIFACTS_DIR = Path("artifacts")
 CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 FINAL_MODEL_DIR = ARTIFACTS_DIR / "final_model"
+CONFUSION_MATRIX_DIR = ARTIFACTS_DIR / "confusionmatrix"
 PROGRESS_STATE_PATH = RESULTS_DIR / "training_progress_state.json"
 HOLDOUT_ALL_MODELS_PATH = RESULTS_DIR / "holdout_test_metrics_all_models.csv"
 
@@ -422,6 +424,12 @@ def _ensure_final_model_and_holdout(
                 f"{cname}: F1={test_metrics['f1_per_class'][i]:.4f} | P={test_metrics['precision_per_class'][i]:.4f} | R={test_metrics['recall_per_class'][i]:.4f}"
             )
         print("  Holdout Per-class -> " + " | ".join(per_lines))
+    if class_names is not None:
+        y_prob = final_model.predict(test_ds, verbose=0)
+        y_pred = np.argmax(y_prob, axis=1)
+        backbone_name = f"{model_name}_img{img_size}"
+        plot_and_save_confusion_matrix(y_test, y_pred, class_names, backbone_name, CONFUSION_MATRIX_DIR)
+        print(f"Saved confusion matrix: {CONFUSION_MATRIX_DIR}/confusion_matrix_{backbone_name}.png")
     holdout_all = _upsert_model_metric(
         holdout_all,
         {
@@ -453,6 +461,7 @@ def main():
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    CONFUSION_MATRIX_DIR.mkdir(parents=True, exist_ok=True)
 
     fold_results, results = _load_partial_metrics()
     full_train_class_weight = get_class_weight(y_train, num_classes)

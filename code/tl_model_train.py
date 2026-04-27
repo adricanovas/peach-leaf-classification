@@ -8,7 +8,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-from utils import load_paths_and_labels, make_dataset
+from utils import load_paths_and_labels, make_dataset, plot_and_save_confusion_matrix
 
 # =========================
 # Config
@@ -56,6 +56,7 @@ TL_FINAL_MODEL_DIR = TL_ARTIFACTS_DIR / "final_model"
 TL_RESULTS_DIR = TL_ARTIFACTS_DIR / "results"
 RESULTS_PATH = TL_RESULTS_DIR / "domain_shift_tl_results.csv"
 BEST_RESULTS_PATH = TL_RESULTS_DIR / "domain_shift_tl_best_by_model.csv"
+TL_CONFUSION_MATRIX_DIR = TL_ARTIFACTS_DIR / "confusionmatrix"
 
 MODEL_SPECS = {
     "mobilenetv2": (
@@ -288,6 +289,7 @@ def main():
     TL_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     TL_FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     TL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    TL_CONFUSION_MATRIX_DIR.mkdir(parents=True, exist_ok=True)
 
     results = []
     if RESULTS_PATH.exists():
@@ -415,6 +417,11 @@ def main():
                     f"F1-weighted: {after_metrics['f1_weighted']:.4f} | "
                     f"Acc: {after_metrics['accuracy']:.4f}"
                 )
+                y_prob = model_ft.predict(test_ds, verbose=0)
+                y_pred = np.argmax(y_prob, axis=1)
+                backbone_name = f"{model_name}_img{img_size}_{strategy}"
+                plot_and_save_confusion_matrix(y_test, y_pred, class_names, backbone_name, TL_CONFUSION_MATRIX_DIR)
+                print(f"Saved confusion matrix: {TL_CONFUSION_MATRIX_DIR}/confusion_matrix_{backbone_name}.png")
 
                 row = {
                     "model": model_name,
