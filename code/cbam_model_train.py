@@ -1,19 +1,26 @@
+import os
+os.environ['TF_DETERMINISTIC_OPS'] = '1'
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+
 from pathlib import Path
+import gc
 import shutil
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
-from sklearn.utils.class_weight import compute_class_weight
 
 from utils import (
     build_training_progress,
     cbam_block,
+    evaluate_predictions,
+    get_class_weight,
     load_paths_and_labels,
     make_dataset,
     plot_and_save_confusion_matrix,
+    set_global_seeds,
+    train_two_stage,
     write_json,
 )
 
@@ -48,9 +55,9 @@ BASE_SEED = 5681
 TEST_SIZE = 0.2
 IMAGE_SIZES = [192, 224]
 USE_AUGMENTATION = True
+USE_MIXED_PRECISION = True
 
-# ARTIFACTS_DIR = Path("artifacts")
-ARTIFACTS_DIR = Path("artifacts")
+ARTIFACTS_DIR = Path(os.environ.get("CBAM_ARTIFACTS_DIR", "artifacts_cbam"))
 CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 FINAL_MODEL_DIR = ARTIFACTS_DIR / "final_model"
@@ -109,13 +116,30 @@ MODEL_SPECS = {
 }
 
 
+def build_model_with_cbam(model_name, num_classes, img_size, model_specs):
+    base_cls, _ = model_specs[model_name]
+    base = base_cls(
+        include_top=False,
+        weights="imagenet",
+        input_shape=(img_size, img_size, 3),
+    )
+    base.trainable = False
+
+    inputs = tf.keras.Input(shape=(img_size, img_size, 3))
+    x = base(inputs, training=False)
+    x = cbam_block(x, reduction_ratio=16)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
+    model = tf.keras.Model(inputs, outputs)
+    return model, base
+
+
 def _load_partial_metrics():
     fold_results = []
     results = []
-
     folds_csv = RESULTS_DIR / "cv_fold_metrics.csv"
     ranking_csv = RESULTS_DIR / "cv_ranking.csv"
-
     if folds_csv.exists():
         fold_results = pd.read_csv(folds_csv).to_dict(orient="records")
     if ranking_csv.exists():
@@ -126,7 +150,6 @@ def _load_partial_metrics():
 def _persist_partial_metrics(fold_results, results):
     df_folds = pd.DataFrame(fold_results)
     df_results = pd.DataFrame(results)
-
     if not df_folds.empty:
         df_folds.to_csv(RESULTS_DIR / "cv_fold_metrics.csv", index=False)
     if not df_results.empty:
@@ -194,9 +217,7 @@ def _try_load_fold_checkpoint(model, checkpoint_path):
         try:
             checkpoint_path.unlink(missing_ok=True)
         except OSError as unlink_exc:
-            print(
-                f"[WARN] Could not delete corrupt checkpoint {checkpoint_path.name}: {unlink_exc}"
-            )
+            print(f"[WARN] Could not delete corrupt checkpoint {checkpoint_path.name}: {unlink_exc}")
         return False
 
 
@@ -234,133 +255,6 @@ def _persist_progress_state(fold_results, current_item=None):
     print(f"Progress: {state['progress']} | pending: {state['pending_steps']}")
 
 
-def build_model_with_cbam(model_name, num_classes, img_size, model_specs):
-    base_cls, _ = model_specs[model_name]
-    base = base_cls(
-        include_top=False,
-        weights="imagenet",
-        input_shape=(img_size, img_size, 3),
-    )
-    base.trainable = False
-
-    inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = base(inputs, training=False)
-    x = cbam_block(x, reduction_ratio=16)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
-    model = tf.keras.Model(inputs, outputs)
-    return model, base
-
-
-def set_finetune_layers(base_model, unfreeze_ratio):
-    base_model.trainable = True
-    n_layers = len(base_model.layers)
-    start_idx = int(n_layers * (1 - unfreeze_ratio))
-
-    for layer in base_model.layers[:start_idx]:
-        layer.trainable = False
-    for layer in base_model.layers[start_idx:]:
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            layer.trainable = False
-
-
-def get_class_weight(labels, num_classes):
-    cls_w = compute_class_weight(
-        class_weight="balanced",
-        classes=np.arange(num_classes),
-        y=labels,
-    )
-    return {i: float(w) for i, w in enumerate(cls_w)}
-
-
-def train_two_stage(
-    model,
-    base_model,
-    train_ds,
-    class_weight,
-    val_ds=None,
-    best_checkpoint_path=None,
-):
-    head_callbacks = []
-    finetune_callbacks = []
-
-    if val_ds is not None:
-        head_callbacks.append(
-            tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=3, restore_best_weights=True
-            )
-        )
-        finetune_callbacks.append(
-            tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=4, restore_best_weights=True
-            )
-        )
-        finetune_callbacks.append(
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6
-            )
-        )
-        if best_checkpoint_path is not None:
-            finetune_callbacks.append(
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=str(best_checkpoint_path),
-                    monitor="val_loss",
-                    save_best_only=True,
-                    save_weights_only=True,
-                    verbose=0,
-                )
-            )
-    base_model.trainable = False
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(HEAD_LR),
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=HEAD_EPOCHS,
-        class_weight=class_weight,
-        callbacks=head_callbacks,
-        verbose=1,
-    )
-
-    set_finetune_layers(base_model, UNFREEZE_RATIO)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(FINETUNE_LR),
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=FINETUNE_EPOCHS,
-        class_weight=class_weight,
-        callbacks=finetune_callbacks,
-        verbose=1,
-    )
-
-
-def evaluate_predictions(model, dataset, y_true, class_names=None):
-    y_prob = model.predict(dataset, verbose=0)
-    y_pred = np.argmax(y_prob, axis=1)
-    # per-class metrics
-    precision_per = precision_score(y_true, y_pred, average=None, zero_division=0)
-    recall_per = recall_score(y_true, y_pred, average=None, zero_division=0)
-    f1_per = f1_score(y_true, y_pred, average=None)
-    return {
-        "f1_macro": f1_score(y_true, y_pred, average="macro"),
-        "f1_weighted": f1_score(y_true, y_pred, average="weighted"),
-        "accuracy": accuracy_score(y_true, y_pred),
-        "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
-        "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
-        "precision_per_class": precision_per.tolist(),
-        "recall_per_class": recall_per.tolist(),
-        "f1_per_class": f1_per.tolist(),
-    }
-
-
 def _ensure_final_model_and_holdout(
     model_name,
     model_name_with_tag,
@@ -393,38 +287,32 @@ def _ensure_final_model_and_holdout(
         return holdout_all
 
     tf.keras.backend.clear_session()
-    tf.keras.utils.set_random_seed(BASE_SEED)
+    set_global_seeds(BASE_SEED)
 
     train_ds = make_dataset(
-        X_train,
-        y_train,
-        img_size,
-        preprocess_fn,
-        BATCH_SIZE,
-        training=True,
-        use_augmentation=USE_AUGMENTATION,
+        X_train, y_train, img_size, preprocess_fn, BATCH_SIZE,
+        training=True, use_augmentation=USE_AUGMENTATION, seed=BASE_SEED,
     )
     test_ds = make_dataset(
-        X_test,
-        y_test,
-        img_size,
-        preprocess_fn,
-        BATCH_SIZE,
-        training=False,
+        X_test, y_test, img_size, preprocess_fn, BATCH_SIZE,
+        training=False, seed=BASE_SEED,
     )
 
     if final_model_path.exists():
         print("Loading existing final model to compute missing holdout metrics.")
         final_model = tf.keras.models.load_model(final_model_path)
     else:
-        final_model, final_base = build_model_with_cbam(
-            model_name, num_classes, img_size, MODEL_SPECS
-        )
+        final_model, final_base = build_model_with_cbam(model_name, num_classes, img_size, MODEL_SPECS)
         train_two_stage(
             model=final_model,
             base_model=final_base,
             train_ds=train_ds,
             class_weight=class_weight,
+            head_epochs=HEAD_EPOCHS,
+            finetune_epochs=FINETUNE_EPOCHS,
+            head_lr=HEAD_LR,
+            finetune_lr=FINETUNE_LR,
+            unfreeze_ratio=UNFREEZE_RATIO,
             val_ds=None,
             best_checkpoint_path=None,
         )
@@ -441,44 +329,46 @@ def _ensure_final_model_and_holdout(
         f"Recall-macro: {test_metrics['recall_macro']:.4f}"
     )
     if "f1_per_class" in test_metrics and class_names is not None:
-        per_lines = []
-        for i, cname in enumerate(class_names):
-            per_lines.append(
-                f"{cname}: F1={test_metrics['f1_per_class'][i]:.4f} | P={test_metrics['precision_per_class'][i]:.4f} | R={test_metrics['recall_per_class'][i]:.4f}"
-            )
+        per_lines = [
+            f"{cn}: F1={test_metrics['f1_per_class'][i]:.4f} | "
+            f"P={test_metrics['precision_per_class'][i]:.4f} | "
+            f"R={test_metrics['recall_per_class'][i]:.4f}"
+            for i, cn in enumerate(class_names)
+        ]
         print("  Holdout Per-class -> " + " | ".join(per_lines))
     if class_names is not None:
         y_prob = final_model.predict(test_ds, verbose=0)
         y_pred = np.argmax(y_prob, axis=1)
+        del y_prob
         backbone_name = f"{model_name_with_tag}_img{img_size}"
         plot_and_save_confusion_matrix(y_test, y_pred, class_names, backbone_name, CONFUSION_MATRIX_DIR)
         print(f"Saved confusion matrix: {CONFUSION_MATRIX_DIR}/confusion_matrix_{backbone_name}.png")
+
     holdout_all = _upsert_model_metric(
         holdout_all,
-        {
-            "model": model_name_with_tag,
-            "img_size": int(img_size),
-            **test_metrics,
-        },
+        {"model": model_name_with_tag, "img_size": int(img_size), **test_metrics},
     )
     pd.DataFrame(holdout_all).to_csv(HOLDOUT_ALL_MODELS_PATH, index=False)
+    del final_model, train_ds, test_ds
+    gc.collect()
+    tf.keras.backend.clear_session()
     return holdout_all
 
 
 def main():
+    set_global_seeds(BASE_SEED)
+    if USE_MIXED_PRECISION:
+        tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+
     X, y, class_names = load_paths_and_labels(DATA_DIR)
     num_classes = len(class_names)
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=TEST_SIZE,
-        stratify=y,
-        random_state=BASE_SEED,
+        X, y, test_size=TEST_SIZE, stratify=y, random_state=BASE_SEED,
     )
 
     print(f"Total samples: {len(X)}")
-    print(f"Train samples:   {len(X_train)}")
+    print(f"Train samples: {len(X_train)}")
     print(f"Test samples:  {len(X_test)}")
 
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -498,25 +388,19 @@ def main():
             print(f"\n===== {model_name_with_tag} | img_size={img_size} =====")
 
             rkf = RepeatedStratifiedKFold(
-                n_splits=N_SPLITS,
-                n_repeats=N_REPEATS,
-                random_state=BASE_SEED,
+                n_splits=N_SPLITS, n_repeats=N_REPEATS, random_state=BASE_SEED,
             )
 
             fold_scores = []
             for fold, (tr_idx, va_idx) in enumerate(rkf.split(X_train, y_train), start=1):
                 fold_item = _fold_item_key(model_name_with_tag, img_size, fold)
-                existing = _find_fold_result(
-                    fold_results, model_name_with_tag, img_size, fold
-                )
+                existing = _find_fold_result(fold_results, model_name_with_tag, img_size, fold)
                 checkpoint_path = (
                     CHECKPOINTS_DIR
                     / f"{model_name_with_tag}_img{img_size}_fold{fold:02d}_best.weights.h5"
                 )
                 if existing is not None:
-                    print(
-                        f"Skipping completed fold with saved metrics: {model_name_with_tag}|img{img_size}|fold{fold:02d}"
-                    )
+                    print(f"Skipping completed fold: {model_name_with_tag}|img{img_size}|fold{fold:02d}")
                     fold_scores.append(
                         {
                             "f1_macro": float(existing["f1_macro"]),
@@ -530,33 +414,26 @@ def main():
                     continue
 
                 tf.keras.backend.clear_session()
-                tf.keras.utils.set_random_seed(BASE_SEED + fold)
+                set_global_seeds(BASE_SEED + fold)
 
                 X_tr, y_tr = X_train[tr_idx], y_train[tr_idx]
                 X_va, y_va = X_train[va_idx], y_train[va_idx]
 
                 train_ds = make_dataset(
-                    X_tr,
-                    y_tr,
-                    img_size,
-                    preprocess_fn,
-                    BATCH_SIZE,
-                    training=True,
-                    use_augmentation=USE_AUGMENTATION,
+                    X_tr, y_tr, img_size, preprocess_fn, BATCH_SIZE,
+                    training=True, use_augmentation=USE_AUGMENTATION, seed=BASE_SEED + fold,
                 )
                 val_ds = make_dataset(
-                    X_va, y_va, img_size, preprocess_fn, BATCH_SIZE, training=False
+                    X_va, y_va, img_size, preprocess_fn, BATCH_SIZE,
+                    training=False, seed=BASE_SEED + fold,
                 )
 
                 fold_class_weight = get_class_weight(y_tr, num_classes)
-                model, base = build_model_with_cbam(
-                    model_name, num_classes, img_size, MODEL_SPECS
-                )
+                model, base = build_model_with_cbam(model_name, num_classes, img_size, MODEL_SPECS)
+
                 should_train_fold = True
                 if checkpoint_path.exists():
-                    print(
-                        f"Skipping training for fold with existing checkpoint: {checkpoint_path.name}"
-                    )
+                    print(f"Checkpoint found, loading: {checkpoint_path.name}")
                     should_train_fold = not _try_load_fold_checkpoint(model, checkpoint_path)
 
                 if should_train_fold:
@@ -565,6 +442,11 @@ def main():
                         base_model=base,
                         train_ds=train_ds,
                         class_weight=fold_class_weight,
+                        head_epochs=HEAD_EPOCHS,
+                        finetune_epochs=FINETUNE_EPOCHS,
+                        head_lr=HEAD_LR,
+                        finetune_lr=FINETUNE_LR,
+                        unfreeze_ratio=UNFREEZE_RATIO,
                         val_ds=val_ds,
                         best_checkpoint_path=checkpoint_path,
                     )
@@ -573,32 +455,29 @@ def main():
                 fold_scores.append(fold_metrics)
                 fold_results = _upsert_fold_result(
                     fold_results,
-                    {
-                        "model": model_name_with_tag,
-                        "img_size": img_size,
-                        "fold": fold,
-                        **fold_metrics,
-                    },
+                    {"model": model_name_with_tag, "img_size": img_size, "fold": fold, **fold_metrics},
                 )
                 print(
-                    "Fold "
-                    f"{fold:02d} -> "
+                    f"Fold {fold:02d} -> "
                     f"F1-macro: {fold_metrics['f1_macro']:.4f} | "
                     f"F1-weighted: {fold_metrics['f1_weighted']:.4f} | "
                     f"Acc: {fold_metrics['accuracy']:.4f} | "
                     f"Prec-macro: {fold_metrics['precision_macro']:.4f} | "
                     f"Recall-macro: {fold_metrics['recall_macro']:.4f}"
                 )
-                # Per-class metrics (show name if available)
                 if "f1_per_class" in fold_metrics and class_names is not None:
-                    per_lines = []
-                    for i, cname in enumerate(class_names):
-                        per_lines.append(
-                            f"{cname}: F1={fold_metrics['f1_per_class'][i]:.4f} | P={fold_metrics['precision_per_class'][i]:.4f} | R={fold_metrics['recall_per_class'][i]:.4f}"
-                        )
+                    per_lines = [
+                        f"{cn}: F1={fold_metrics['f1_per_class'][i]:.4f} | "
+                        f"P={fold_metrics['precision_per_class'][i]:.4f} | "
+                        f"R={fold_metrics['recall_per_class'][i]:.4f}"
+                        for i, cn in enumerate(class_names)
+                    ]
                     print("  Per-class -> " + " | ".join(per_lines))
+
                 _persist_partial_metrics(fold_results, results)
                 _persist_progress_state(fold_results, current_item=fold_item)
+                del model, base, train_ds, val_ds
+                gc.collect()
 
             f1_macros = [s["f1_macro"] for s in fold_scores]
             f1_weighted = [s["f1_weighted"] for s in fold_scores]
@@ -606,21 +485,11 @@ def main():
             precision_macros = [s["precision_macro"] for s in fold_scores]
             recall_macros = [s["recall_macro"] for s in fold_scores]
 
-            print(
-                f"{model_name_with_tag} (img={img_size}) | F1-macro mean±std: {np.mean(f1_macros):.4f} ± {np.std(f1_macros):.4f}"
-            )
-            print(
-                f"{model_name_with_tag} (img={img_size}) | F1-weighted mean±std: {np.mean(f1_weighted):.4f} ± {np.std(f1_weighted):.4f}"
-            )
-            print(
-                f"{model_name_with_tag} (img={img_size}) | Acc mean±std:      {np.mean(accs):.4f} ± {np.std(accs):.4f}"
-            )
-            print(
-                f"{model_name_with_tag} (img={img_size}) | Prec-macro mean±std: {np.mean(precision_macros):.4f} ± {np.std(precision_macros):.4f}"
-            )
-            print(
-                f"{model_name_with_tag} (img={img_size}) | Recall-macro mean±std: {np.mean(recall_macros):.4f} ± {np.std(recall_macros):.4f}"
-            )
+            print(f"{model_name_with_tag} (img={img_size}) | F1-macro mean±std: {np.mean(f1_macros):.4f} ± {np.std(f1_macros):.4f}")
+            print(f"{model_name_with_tag} (img={img_size}) | F1-weighted mean±std: {np.mean(f1_weighted):.4f} ± {np.std(f1_weighted):.4f}")
+            print(f"{model_name_with_tag} (img={img_size}) | Acc mean±std: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+            print(f"{model_name_with_tag} (img={img_size}) | Prec-macro mean±std: {np.mean(precision_macros):.4f} ± {np.std(precision_macros):.4f}")
+            print(f"{model_name_with_tag} (img={img_size}) | Recall-macro mean±std: {np.mean(recall_macros):.4f} ± {np.std(recall_macros):.4f}")
 
             summary = {
                 "model": model_name_with_tag,
@@ -638,12 +507,8 @@ def main():
                 "runs": len(fold_scores),
             }
             results = [
-                row
-                for row in results
-                if not (
-                    row["model"] == model_name_with_tag
-                    and int(row["img_size"]) == img_size
-                )
+                row for row in results
+                if not (row["model"] == model_name_with_tag and int(row["img_size"]) == img_size)
             ]
             results.append(summary)
             _persist_partial_metrics(fold_results, results)
@@ -672,11 +537,10 @@ def main():
     for row in df_results.to_dict(orient="records"):
         model_name_with_tag = row["model"]
         model_name = model_name_with_tag.replace("_cbam", "")
-        img_size = int(row["img_size"])
         holdout_all = _ensure_final_model_and_holdout(
             model_name=model_name,
             model_name_with_tag=model_name_with_tag,
-            img_size=img_size,
+            img_size=int(row["img_size"]),
             X_train=X_train,
             y_train=y_train,
             X_test=X_test,
@@ -689,14 +553,11 @@ def main():
 
     holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
     if holdout_all:
-        best_model_name = df_results.iloc[0]["model"]
-        best_img_size = int(df_results.iloc[0]["img_size"])
         best_holdout = next(
             (
-                item
-                for item in holdout_all
-                if item["model"] == best_model_name
-                and int(item["img_size"]) == best_img_size
+                item for item in holdout_all
+                if item["model"] == df_results.iloc[0]["model"]
+                and int(item["img_size"]) == int(df_results.iloc[0]["img_size"])
             ),
             None,
         )
@@ -715,9 +576,7 @@ def main():
         src_path = FINAL_MODEL_DIR / f"{model_name_with_tag}_img{img_size}_final.keras"
         dst_path = FINAL_MODEL_DIR / f"{model_name_with_tag}_best_final.keras"
         if not src_path.exists():
-            print(
-                f"[WARN] Best candidate missing on disk, skipping best alias: {src_path.name}"
-            )
+            print(f"[WARN] Best candidate missing on disk, skipping: {src_path.name}")
             continue
         shutil.copy2(src_path, dst_path)
         best_per_arch_rows.append(

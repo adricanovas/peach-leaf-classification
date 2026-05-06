@@ -1,16 +1,45 @@
 import json
+import os
+import random
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+
 import cv2
 import albumentations as A
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def create_augmentation_pipeline(is_training: bool = True, img_size: Tuple[int, int] = (224, 224)) -> A.Compose:
+
+# =============================================================================
+# Seeds & determinism
+# =============================================================================
+
+def set_global_seeds(seed: int) -> None:
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.keras.utils.set_random_seed(seed)
+
+
+# =============================================================================
+# Data loading & augmentation
+# =============================================================================
+
+def create_augmentation_pipeline(
+    is_training: bool = True,
+    img_size: Tuple[int, int] = (224, 224),
+) -> A.Compose:
     if is_training:
         return A.Compose([
             A.Rotate(limit=10, border_mode=cv2.BORDER_CONSTANT, fill=0, p=0.5),
@@ -19,15 +48,12 @@ def create_augmentation_pipeline(is_training: bool = True, img_size: Tuple[int, 
                 scale=(0.9, 1.0),
                 ratio=(0.9, 1.1),
                 interpolation=cv2.INTER_LINEAR,
-                p=0.3
+                p=0.3,
             ),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.2),
-
             A.RandomBrightnessContrast(brightness_limit=0.08, contrast_limit=0.08, p=0.3),
-
             A.HueSaturationValue(hue_shift_limit=3, sat_shift_limit=5, val_shift_limit=4, p=0.2),
-
             A.Affine(
                 translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
                 scale=(0.95, 1.05),
@@ -39,9 +65,8 @@ def create_augmentation_pipeline(is_training: bool = True, img_size: Tuple[int, 
             ),
         ])
     else:
-        return A.Compose([
-            A.Resize(height=img_size[0], width=img_size[1]),
-        ])
+        return A.Compose([A.Resize(height=img_size[0], width=img_size[1])])
+
 
 def load_paths_and_labels(data_dir: Path):
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -67,6 +92,7 @@ def make_dataset(
     batch_size=32,
     training=False,
     use_augmentation=False,
+    seed: int = 0,
 ):
     paths = tf.convert_to_tensor(paths, dtype=tf.string)
     labels = tf.convert_to_tensor(labels, dtype=tf.int32)
@@ -75,7 +101,7 @@ def make_dataset(
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
 
     if training:
-        ds = ds.shuffle(buffer_size=len(paths), reshuffle_each_iteration=True)
+        ds = ds.shuffle(buffer_size=len(paths), seed=seed, reshuffle_each_iteration=True)
 
     augmenter = (
         create_augmentation_pipeline(is_training=True, img_size=(img_size, img_size))
@@ -101,10 +127,14 @@ def make_dataset(
         y = tf.one_hot(y, depth=num_classes)
         return img, y
 
-    ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
+    ds = ds.batch(batch_size).prefetch(2)
     return ds
 
+
+# =============================================================================
+# Model building
+# =============================================================================
 
 def build_model(model_name, num_classes, img_size, model_specs):
     base_cls, _ = model_specs[model_name]
@@ -123,6 +153,7 @@ def build_model(model_name, num_classes, img_size, model_specs):
     model = tf.keras.Model(inputs, outputs)
     return model, base
 
+
 class SpatialPooling(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         super(SpatialPooling, self).__init__(**kwargs)
@@ -134,6 +165,7 @@ class SpatialPooling(tf.keras.layers.Layer):
 
     def get_config(self):
         return super().get_config()
+
 
 def cbam_block(input_tensor, reduction_ratio=16):
     channel = input_tensor.shape[-1]
@@ -177,6 +209,241 @@ def cbam_block(input_tensor, reduction_ratio=16):
     return refined
 
 
+# =============================================================================
+# Shared training utilities
+# =============================================================================
+
+def get_class_weight(labels, num_classes):
+    cls_w = compute_class_weight(
+        class_weight="balanced",
+        classes=np.arange(num_classes),
+        y=labels,
+    )
+    return {i: float(w) for i, w in enumerate(cls_w)}
+
+
+def evaluate_predictions(model, dataset, y_true, class_names=None):
+    """Evaluate model predictions. Per-class metrics are included when class_names is provided."""
+    y_prob = model.predict(dataset, verbose=0)
+    y_pred = np.argmax(y_prob, axis=1)
+    del y_prob
+    result = {
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro")),
+        "f1_weighted": float(f1_score(y_true, y_pred, average="weighted")),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
+        "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+    }
+    if class_names is not None:
+        result["precision_per_class"] = precision_score(y_true, y_pred, average=None, zero_division=0).tolist()
+        result["recall_per_class"] = recall_score(y_true, y_pred, average=None, zero_division=0).tolist()
+        result["f1_per_class"] = f1_score(y_true, y_pred, average=None).tolist()
+    return result
+
+
+def set_finetune_layers(base_model, unfreeze_ratio):
+    base_model.trainable = True
+    n_layers = len(base_model.layers)
+    start_idx = int(n_layers * (1 - unfreeze_ratio))
+    for layer in base_model.layers[:start_idx]:
+        layer.trainable = False
+    for layer in base_model.layers[start_idx:]:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            layer.trainable = False
+
+
+def train_two_stage(
+    model,
+    base_model,
+    train_ds,
+    class_weight,
+    head_epochs,
+    finetune_epochs,
+    head_lr,
+    finetune_lr,
+    unfreeze_ratio,
+    val_ds=None,
+    best_checkpoint_path=None,
+):
+    head_callbacks = []
+    finetune_callbacks = []
+
+    if val_ds is not None:
+        head_callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss", patience=3, restore_best_weights=True
+            )
+        )
+        finetune_callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss", patience=4, restore_best_weights=True
+            )
+        )
+        finetune_callbacks.append(
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6
+            )
+        )
+        if best_checkpoint_path is not None:
+            finetune_callbacks.append(
+                tf.keras.callbacks.ModelCheckpoint(
+                    filepath=str(best_checkpoint_path),
+                    monitor="val_loss",
+                    save_best_only=True,
+                    save_weights_only=True,
+                    verbose=0,
+                )
+            )
+    base_model.trainable = False
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(head_lr),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=head_epochs,
+        class_weight=class_weight,
+        callbacks=head_callbacks,
+        verbose=1,
+    )
+
+    set_finetune_layers(base_model, unfreeze_ratio)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(finetune_lr),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=finetune_epochs,
+        class_weight=class_weight,
+        callbacks=finetune_callbacks,
+        verbose=1,
+    )
+
+
+# =============================================================================
+# Transfer learning utilities
+# =============================================================================
+
+def find_backbone(model):
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.Model):
+            return layer
+    raise ValueError("No backbone submodel found in model.")
+
+
+def _mark_head_trainable(model, trainable):
+    for layer in model.layers:
+        if not isinstance(layer, tf.keras.Model):
+            layer.trainable = trainable
+
+
+def apply_fine_tuning_strategy(model, strategy, last_n_layers=20, freeze_batchnorm=True):
+    backbone = find_backbone(model)
+
+    if strategy == "feature_extractor":
+        backbone.trainable = False
+        _mark_head_trainable(model, True)
+        return model
+
+    if strategy == "fine_tune_last":
+        backbone.trainable = True
+        cutoff = max(0, len(backbone.layers) - last_n_layers)
+        for layer in backbone.layers[:cutoff]:
+            layer.trainable = False
+        for layer in backbone.layers[cutoff:]:
+            layer.trainable = not (
+                freeze_batchnorm and isinstance(layer, tf.keras.layers.BatchNormalization)
+            )
+        _mark_head_trainable(model, True)
+        return model
+
+    if strategy == "fine_tune_all":
+        backbone.trainable = True
+        if freeze_batchnorm:
+            for layer in backbone.layers:
+                if isinstance(layer, tf.keras.layers.BatchNormalization):
+                    layer.trainable = False
+        _mark_head_trainable(model, True)
+        return model
+
+    raise ValueError(f"Unknown strategy: {strategy}")
+
+
+def rebuild_model_for_target_classes(model, num_classes):
+    """Replace the classifier head while preserving all learned features (backbone + CBAM)."""
+    if len(model.layers) >= 2 and isinstance(model.layers[-1], tf.keras.layers.Dense):
+        inputs = model.input
+        x = model.layers[-2].output
+        outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="tl_head")(x)
+        return tf.keras.Model(inputs, outputs)
+    backbone = find_backbone(model)
+    inputs = tf.keras.Input(shape=model.input_shape[1:])
+    x = backbone(inputs, training=False)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="tl_head")(x)
+    return tf.keras.Model(inputs, outputs)
+
+
+def train_tl(model, train_ds, val_ds, class_weight, checkpoint_path, epochs=15, lr=1e-4):
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=5,
+            restore_best_weights=True,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=str(checkpoint_path),
+            monitor="val_loss",
+            save_best_only=True,
+            save_weights_only=True,
+            verbose=0,
+        ),
+    ]
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(lr),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=epochs,
+        class_weight=class_weight,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+
+def upsert_result(rows, row):
+    """Upsert a TL result row keyed by (model, img_size, strategy)."""
+    filtered = [
+        item for item in rows
+        if not (
+            item["model"] == row["model"]
+            and int(item["img_size"]) == int(row["img_size"])
+            and item["strategy"] == row["strategy"]
+        )
+    ]
+    filtered.append(row)
+    return filtered
+
+
+# =============================================================================
+# Progress tracking & persistence
+# =============================================================================
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -206,26 +473,26 @@ def build_training_progress(
     }
 
 
+# =============================================================================
+# Visualisation
+# =============================================================================
+
 def plot_and_save_confusion_matrix(y_true, y_pred, class_names, backbone_name, out_dir):
-    """Genera y guarda la matriz de confusión (mismo formato que en el paper)."""
     cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
-    
-    # intensidad de color relativa a la cantidad de muestras por clase
     cm_color = cm.astype(np.float32) / cm.sum(axis=1, keepdims=True)
     cm_color = np.nan_to_num(cm_color)
 
     plt.figure(figsize=(8, 6))
-
     sns.heatmap(
-        cm_color,           
-        annot=cm,          
+        cm_color,
+        annot=cm,
         fmt="d",
         cmap="Blues",
         xticklabels=class_names,
         yticklabels=class_names,
-        vmin=0, vmax=1
+        vmin=0,
+        vmax=1,
     )
-
     plt.xlabel("Predicted")
     plt.ylabel("Real")
     plt.xticks(rotation=45, ha="right")
