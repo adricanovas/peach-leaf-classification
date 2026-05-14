@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import random
@@ -7,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import albumentations as A
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from pathlib import Path
 from sklearn.metrics import (
@@ -19,6 +21,39 @@ from sklearn.metrics import (
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+
+# =============================================================================
+# Shared configuration
+# =============================================================================
+
+MODELS = [
+    "mobilenetv2",
+    "efficientnetb0",
+    "mobilenetv3large",
+    "densenet121",
+    "efficientnetb3",
+    "resnet50",
+    "inceptionv3",
+    "resnet101",
+    "vgg16",
+    "vgg19",
+    "efficientnetb5",
+]
+
+MODEL_SPECS = {
+    "mobilenetv2": (tf.keras.applications.MobileNetV2, tf.keras.applications.mobilenet_v2.preprocess_input),
+    "efficientnetb0": (tf.keras.applications.EfficientNetB0, tf.keras.applications.efficientnet.preprocess_input),
+    "mobilenetv3large": (tf.keras.applications.MobileNetV3Large, tf.keras.applications.mobilenet_v3.preprocess_input),
+    "densenet121": (tf.keras.applications.DenseNet121, tf.keras.applications.densenet.preprocess_input),
+    "efficientnetb3": (tf.keras.applications.EfficientNetB3, tf.keras.applications.efficientnet.preprocess_input),
+    "resnet50": (tf.keras.applications.ResNet50, tf.keras.applications.resnet.preprocess_input),
+    "inceptionv3": (tf.keras.applications.InceptionV3, tf.keras.applications.inception_v3.preprocess_input),
+    "resnet101": (tf.keras.applications.ResNet101, tf.keras.applications.resnet.preprocess_input),
+    "vgg16": (tf.keras.applications.VGG16, tf.keras.applications.vgg16.preprocess_input),
+    "vgg19": (tf.keras.applications.VGG19, tf.keras.applications.vgg19.preprocess_input),
+    "efficientnetb5": (tf.keras.applications.EfficientNetB5, tf.keras.applications.efficientnet.preprocess_input),
+}
 
 
 # =============================================================================
@@ -128,7 +163,7 @@ def make_dataset(
         return img, y
 
     ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
-    ds = ds.batch(batch_size).prefetch(2)
+    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     return ds
 
 
@@ -169,8 +204,9 @@ class SpatialPooling(tf.keras.layers.Layer):
 
 def cbam_block(input_tensor, reduction_ratio=16):
     channel = input_tensor.shape[-1]
+    bottleneck = max(1, channel // reduction_ratio)
     shared_dense_one = tf.keras.layers.Dense(
-        channel // reduction_ratio,
+        bottleneck,
         activation="relu",
         kernel_initializer="he_normal",
         use_bias=True,
@@ -184,11 +220,13 @@ def cbam_block(input_tensor, reduction_ratio=16):
     avg_pool = tf.keras.layers.GlobalAveragePooling2D()(input_tensor)
     avg_pool = tf.keras.layers.Reshape((1, 1, channel))(avg_pool)
     avg_pool = shared_dense_one(avg_pool)
+    avg_pool = tf.keras.layers.BatchNormalization()(avg_pool)
     avg_pool = shared_dense_two(avg_pool)
 
     max_pool = tf.keras.layers.GlobalMaxPooling2D()(input_tensor)
     max_pool = tf.keras.layers.Reshape((1, 1, channel))(max_pool)
     max_pool = shared_dense_one(max_pool)
+    max_pool = tf.keras.layers.BatchNormalization()(max_pool)
     max_pool = shared_dense_two(max_pool)
 
     channel_attention = tf.keras.layers.Add()([avg_pool, max_pool])
@@ -209,6 +247,38 @@ def cbam_block(input_tensor, reduction_ratio=16):
     return refined
 
 
+def build_multi_output_backbone(base, depth_fraction=0.7):
+    """
+    Wrap a backbone to expose two feature maps: one at ~depth_fraction of its depth
+    (larger spatial resolution, better for spatial attention) and the final one.
+    Returns None on failure so the caller can fall back to single-scale.
+    """
+    candidate_layers = []
+    for layer in base.layers:
+        if isinstance(layer, tf.keras.layers.InputLayer):
+            continue
+        try:
+            out = layer.output
+            if len(out.shape) == 4:
+                candidate_layers.append(layer)
+        except (AttributeError, RuntimeError):
+            continue
+
+    if len(candidate_layers) < 2:
+        return None
+
+    idx = max(0, int(len(candidate_layers) * depth_fraction) - 1)
+    mid_layer = candidate_layers[idx]
+
+    try:
+        return tf.keras.Model(
+            inputs=base.input,
+            outputs=[mid_layer.output, base.output],
+        )
+    except Exception:
+        return None
+
+
 # =============================================================================
 # Shared training utilities
 # =============================================================================
@@ -227,6 +297,7 @@ def evaluate_predictions(model, dataset, y_true, class_names=None):
     y_prob = model.predict(dataset, verbose=0)
     y_pred = np.argmax(y_prob, axis=1)
     del y_prob
+    gc.collect()
     result = {
         "f1_macro": float(f1_score(y_true, y_pred, average="macro")),
         "f1_weighted": float(f1_score(y_true, y_pred, average="weighted")),
@@ -248,8 +319,9 @@ def set_finetune_layers(base_model, unfreeze_ratio):
     for layer in base_model.layers[:start_idx]:
         layer.trainable = False
     for layer in base_model.layers[start_idx:]:
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            layer.trainable = False
+        # Explicit per-layer flag required: model-level trainable=True does not cascade
+        # to individual layer flags when the model was built from a frozen backbone.
+        layer.trainable = not isinstance(layer, tf.keras.layers.BatchNormalization)
 
 
 def train_two_stage(
@@ -263,10 +335,9 @@ def train_two_stage(
     finetune_lr,
     unfreeze_ratio,
     val_ds=None,
-    best_checkpoint_path=None,
 ):
-    head_callbacks = []
-    finetune_callbacks = []
+    head_callbacks = [tf.keras.callbacks.TerminateOnNaN()]
+    finetune_callbacks = [tf.keras.callbacks.TerminateOnNaN()]
 
     if val_ds is not None:
         head_callbacks.append(
@@ -284,16 +355,6 @@ def train_two_stage(
                 monitor="val_loss", factor=0.5, patience=2, min_lr=1e-6
             )
         )
-        if best_checkpoint_path is not None:
-            finetune_callbacks.append(
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=str(best_checkpoint_path),
-                    monitor="val_loss",
-                    save_best_only=True,
-                    save_weights_only=True,
-                    verbose=0,
-                )
-            )
     base_model.trainable = False
     model.compile(
         optimizer=tf.keras.optimizers.Adam(head_lr),
@@ -364,10 +425,10 @@ def apply_fine_tuning_strategy(model, strategy, last_n_layers=20, freeze_batchno
 
     if strategy == "fine_tune_all":
         backbone.trainable = True
-        if freeze_batchnorm:
-            for layer in backbone.layers:
-                if isinstance(layer, tf.keras.layers.BatchNormalization):
-                    layer.trainable = False
+        for layer in backbone.layers:
+            layer.trainable = not (
+                freeze_batchnorm and isinstance(layer, tf.keras.layers.BatchNormalization)
+            )
         _mark_head_trainable(model, True)
         return model
 
@@ -384,13 +445,23 @@ def rebuild_model_for_target_classes(model, num_classes):
     backbone = find_backbone(model)
     inputs = tf.keras.Input(shape=model.input_shape[1:])
     x = backbone(inputs, training=False)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    if isinstance(x, (list, tuple)):
+        x_mid, x_final = x
+        x_mid = cbam_block(x_mid, reduction_ratio=16)
+        x_mid = tf.keras.layers.GlobalAveragePooling2D()(x_mid)
+        x_final = cbam_block(x_final, reduction_ratio=16)
+        x_final = tf.keras.layers.GlobalAveragePooling2D()(x_final)
+        x = tf.keras.layers.Concatenate()([x_mid, x_final])
+    else:
+        x = cbam_block(x, reduction_ratio=16)
+        x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax", name="tl_head")(x)
     return tf.keras.Model(inputs, outputs)
 
 
-def train_tl(model, train_ds, val_ds, class_weight, checkpoint_path, epochs=15, lr=1e-4):
+def train_tl(model, train_ds, val_ds, class_weight, epochs=15, lr=1e-4):
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
@@ -402,13 +473,6 @@ def train_tl(model, train_ds, val_ds, class_weight, checkpoint_path, epochs=15, 
             factor=0.5,
             patience=2,
             min_lr=1e-6,
-        ),
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(checkpoint_path),
-            monitor="val_loss",
-            save_best_only=True,
-            save_weights_only=True,
-            verbose=0,
         ),
     ]
     model.compile(
@@ -438,6 +502,74 @@ def upsert_result(rows, row):
     ]
     filtered.append(row)
     return filtered
+
+
+# =============================================================================
+# CV training helpers
+# =============================================================================
+
+def fold_item_key(model_name, img_size, fold):
+    return f"{model_name}|img{img_size}|fold{int(fold):02d}"
+
+
+def find_fold_result(fold_results, model_name, img_size, fold):
+    return next(
+        (
+            row for row in fold_results
+            if (
+                row["model"] == model_name
+                and int(row["img_size"]) == img_size
+                and int(row["fold"]) == fold
+            )
+        ),
+        None,
+    )
+
+
+def upsert_fold_result(fold_results, row):
+    filtered = [
+        item for item in fold_results
+        if not (
+            item["model"] == row["model"]
+            and int(item["img_size"]) == int(row["img_size"])
+            and int(item["fold"]) == int(row["fold"])
+        )
+    ]
+    filtered.append(row)
+    return filtered
+
+
+def upsert_model_metric(rows, row):
+    filtered = [
+        item for item in rows
+        if not (
+            item["model"] == row["model"]
+            and int(item["img_size"]) == int(row["img_size"])
+        )
+    ]
+    filtered.append(row)
+    return filtered
+
+
+def load_csv_records(path):
+    return pd.read_csv(path).to_dict(orient="records") if Path(path).exists() else []
+
+
+def load_partial_metrics(results_dir):
+    fold_results = load_csv_records(results_dir / "cv_fold_metrics.csv")
+    results = load_csv_records(results_dir / "cv_ranking.csv")
+    return fold_results, results
+
+
+def persist_partial_metrics(fold_results, results, results_dir):
+    df_folds = pd.DataFrame(fold_results)
+    df_results = pd.DataFrame(results)
+    if not df_folds.empty:
+        df_folds.to_csv(results_dir / "cv_fold_metrics.csv", index=False)
+    if not df_results.empty:
+        df_results.sort_values("f1_macro_mean", ascending=False).to_csv(
+            results_dir / "cv_ranking.csv", index=False
+        )
 
 
 # =============================================================================
@@ -499,5 +631,7 @@ def plot_and_save_confusion_matrix(y_true, y_pred, class_names, backbone_name, o
     plt.tight_layout()
 
     out_path = out_dir / f"confusion_matrix_{backbone_name}.png"
-    plt.savefig(out_path, dpi=300)
-    plt.close()
+    try:
+        plt.savefig(out_path, dpi=300)
+    finally:
+        plt.close()

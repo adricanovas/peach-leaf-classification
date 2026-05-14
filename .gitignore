@@ -2,3 +2,4 @@
 artifacts
 artifacts*
 *.cache
+code/__pycache__/

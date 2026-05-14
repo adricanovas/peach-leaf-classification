@@ -5,6 +5,7 @@ os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
 from pathlib import Path
 import gc
 import shutil
+import sys
 
 import numpy as np
 import pandas as pd
@@ -12,15 +13,24 @@ import tensorflow as tf
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
 
 from utils import (
+    MODELS,
+    MODEL_SPECS,
     build_model,
     build_training_progress,
     evaluate_predictions,
+    find_fold_result,
+    fold_item_key,
     get_class_weight,
+    load_csv_records,
+    load_partial_metrics,
     load_paths_and_labels,
     make_dataset,
+    persist_partial_metrics,
     plot_and_save_confusion_matrix,
     set_global_seeds,
     train_two_stage,
+    upsert_fold_result,
+    upsert_model_metric,
     write_json,
 )
 
@@ -28,19 +38,6 @@ from utils import (
 # Config
 # =========================
 DATA_DIR = Path("../data/public_dataset/public_data")
-MODELS = [
-    "mobilenetv2",
-    "efficientnetb0",
-    "mobilenetv3large",
-    "densenet121",
-    "efficientnetb3",
-    "resnet50",
-    "inceptionv3",
-    "resnet101",
-    "vgg16",
-    "vgg19",
-    "efficientnetb5",
-]
 
 HEAD_EPOCHS = 100
 FINETUNE_EPOCHS = 120
@@ -51,171 +48,44 @@ UNFREEZE_RATIO = 0.3
 N_SPLITS = 5
 N_REPEATS = 3
 BATCH_SIZE = 16
-BASE_SEED = 5681
+BASE_SEED = 42
 TEST_SIZE = 0.2
 IMAGE_SIZES = [192, 224]
 USE_AUGMENTATION = True
 USE_MIXED_PRECISION = True
 
 ARTIFACTS_DIR = Path(os.environ.get("ARTIFACTS_DIR", "artifacts"))
-CHECKPOINTS_DIR = ARTIFACTS_DIR / "checkpoints"
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 FINAL_MODEL_DIR = ARTIFACTS_DIR / "final_model"
 CONFUSION_MATRIX_DIR = ARTIFACTS_DIR / "confusionmatrix"
 PROGRESS_STATE_PATH = RESULTS_DIR / "training_progress_state.json"
 HOLDOUT_ALL_MODELS_PATH = RESULTS_DIR / "holdout_test_metrics_all_models.csv"
 
-# =========================
-# Model registry
-# =========================
-MODEL_SPECS = {
-    "mobilenetv2": (
-        tf.keras.applications.MobileNetV2,
-        tf.keras.applications.mobilenet_v2.preprocess_input,
-    ),
-    "efficientnetb0": (
-        tf.keras.applications.EfficientNetB0,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-    "mobilenetv3large": (
-        tf.keras.applications.MobileNetV3Large,
-        tf.keras.applications.mobilenet_v3.preprocess_input,
-    ),
-    "densenet121": (
-        tf.keras.applications.DenseNet121,
-        tf.keras.applications.densenet.preprocess_input,
-    ),
-    "efficientnetb3": (
-        tf.keras.applications.EfficientNetB3,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-    "resnet50": (
-        tf.keras.applications.ResNet50,
-        tf.keras.applications.resnet.preprocess_input,
-    ),
-    "inceptionv3": (
-        tf.keras.applications.InceptionV3,
-        tf.keras.applications.inception_v3.preprocess_input,
-    ),
-    "resnet101": (
-        tf.keras.applications.ResNet101,
-        tf.keras.applications.resnet.preprocess_input,
-    ),
-    "vgg16": (
-        tf.keras.applications.VGG16,
-        tf.keras.applications.vgg16.preprocess_input,
-    ),
-    "vgg19": (
-        tf.keras.applications.VGG19,
-        tf.keras.applications.vgg19.preprocess_input,
-    ),
-    "efficientnetb5": (
-        tf.keras.applications.EfficientNetB5,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-}
+PERSISTENT_ARTIFACTS_DIR = Path(os.environ.get("PERSISTENT_ARTIFACTS_DIR", str(ARTIFACTS_DIR)))
+PERSISTENT_RESULTS_DIR = PERSISTENT_ARTIFACTS_DIR / "results"
+PERSISTENT_FINAL_MODEL_DIR = PERSISTENT_ARTIFACTS_DIR / "final_model"
+PERSISTENT_CONFUSION_MATRIX_DIR = PERSISTENT_ARTIFACTS_DIR / "confusionmatrix"
 
 
-def _load_partial_metrics():
-    fold_results = []
-    results = []
-    folds_csv = RESULTS_DIR / "cv_fold_metrics.csv"
-    ranking_csv = RESULTS_DIR / "cv_ranking.csv"
-    if folds_csv.exists():
-        fold_results = pd.read_csv(folds_csv).to_dict(orient="records")
-    if ranking_csv.exists():
-        results = pd.read_csv(ranking_csv).to_dict(orient="records")
-    return fold_results, results
-
-
-def _persist_partial_metrics(fold_results, results):
-    df_folds = pd.DataFrame(fold_results)
-    df_results = pd.DataFrame(results)
-    if not df_folds.empty:
-        df_folds.to_csv(RESULTS_DIR / "cv_fold_metrics.csv", index=False)
-    if not df_results.empty:
-        df_results = df_results.sort_values("f1_macro_mean", ascending=False)
-        df_results.to_csv(RESULTS_DIR / "cv_ranking.csv", index=False)
-
-
-def _find_fold_result(fold_results, model_name, img_size, fold):
-    return next(
-        (
-            row
-            for row in fold_results
-            if (
-                row["model"] == model_name
-                and int(row["img_size"]) == img_size
-                and int(row["fold"]) == fold
-            )
-        ),
-        None,
-    )
-
-
-def _upsert_fold_result(fold_results, row):
-    filtered = [
-        item
-        for item in fold_results
-        if not (
-            item["model"] == row["model"]
-            and int(item["img_size"]) == int(row["img_size"])
-            and int(item["fold"]) == int(row["fold"])
-        )
-    ]
-    filtered.append(row)
-    return filtered
-
-
-def _upsert_model_metric(rows, row):
-    filtered = [
-        item
-        for item in rows
-        if not (
-            item["model"] == row["model"]
-            and int(item["img_size"]) == int(row["img_size"])
-        )
-    ]
-    filtered.append(row)
-    return filtered
-
-
-def _load_holdout_metrics_all_models():
-    if HOLDOUT_ALL_MODELS_PATH.exists():
-        return pd.read_csv(HOLDOUT_ALL_MODELS_PATH).to_dict(orient="records")
-    return []
-
-
-def _try_load_fold_checkpoint(model, checkpoint_path):
-    try:
-        model.load_weights(checkpoint_path)
-        return True
-    except (OSError, ValueError, tf.errors.OpError) as exc:
-        print(
-            f"[WARN] Failed to load checkpoint {checkpoint_path.name}: {exc}. "
-            "Deleting it and retraining the fold."
-        )
-        try:
-            checkpoint_path.unlink(missing_ok=True)
-        except OSError as unlink_exc:
-            print(f"[WARN] Could not delete corrupt checkpoint {checkpoint_path.name}: {unlink_exc}")
-        return False
-
-
-def _fold_item_key(model_name, img_size, fold):
-    return f"{model_name}|img{img_size}|fold{int(fold):02d}"
+def _sync_dir_to_persistent(src: Path, dst: Path):
+    if src.resolve() == dst.resolve():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
 
 
 def _compute_fold_progress_state(fold_results):
     all_items = [
-        _fold_item_key(model_name, img_size, fold)
+        fold_item_key(model_name, img_size, fold)
         for model_name in MODELS
         for img_size in IMAGE_SIZES
         for fold in range(1, (N_SPLITS * N_REPEATS) + 1)
     ]
     done_items = sorted(
         {
-            _fold_item_key(row["model"], int(row["img_size"]), int(row["fold"]))
+            fold_item_key(row["model"], int(row["img_size"]), int(row["fold"]))
             for row in fold_results
         }
     )
@@ -252,8 +122,7 @@ def _ensure_final_model_and_holdout(
     final_model_path = FINAL_MODEL_DIR / f"{model_name}_img{img_size}_final.keras"
     existing_holdout = next(
         (
-            item
-            for item in holdout_all
+            item for item in holdout_all
             if item["model"] == model_name and int(item["img_size"]) == int(img_size)
         ),
         None,
@@ -295,8 +164,12 @@ def _ensure_final_model_and_holdout(
             val_ds=None,
             best_checkpoint_path=None,
         )
+        del final_base
         final_model.save(final_model_path)
         print(f"Saved final model: {final_model_path}")
+        if PERSISTENT_FINAL_MODEL_DIR.resolve() != FINAL_MODEL_DIR.resolve():
+            PERSISTENT_FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(final_model_path, PERSISTENT_FINAL_MODEL_DIR / final_model_path.name)
 
     test_metrics = evaluate_predictions(final_model, test_ds, y_test, class_names=class_names)
     print(
@@ -319,15 +192,18 @@ def _ensure_final_model_and_holdout(
         y_prob = final_model.predict(test_ds, verbose=0)
         y_pred = np.argmax(y_prob, axis=1)
         del y_prob
+        gc.collect()
         backbone_name = f"{model_name}_img{img_size}"
         plot_and_save_confusion_matrix(y_test, y_pred, class_names, backbone_name, CONFUSION_MATRIX_DIR)
         print(f"Saved confusion matrix: {CONFUSION_MATRIX_DIR}/confusion_matrix_{backbone_name}.png")
 
-    holdout_all = _upsert_model_metric(
+    holdout_all = upsert_model_metric(
         holdout_all,
         {"model": model_name, "img_size": int(img_size), **test_metrics},
     )
     pd.DataFrame(holdout_all).to_csv(HOLDOUT_ALL_MODELS_PATH, index=False)
+    _sync_dir_to_persistent(RESULTS_DIR, PERSISTENT_RESULTS_DIR)
+    _sync_dir_to_persistent(CONFUSION_MATRIX_DIR, PERSISTENT_CONFUSION_MATRIX_DIR)
     del final_model, train_ds, test_ds
     gc.collect()
     tf.keras.backend.clear_session()
@@ -335,6 +211,7 @@ def _ensure_final_model_and_holdout(
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     set_global_seeds(BASE_SEED)
     if USE_MIXED_PRECISION:
         tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
@@ -350,14 +227,15 @@ def main():
     print(f"Train samples: {len(X_train)}")
     print(f"Test samples:  {len(X_test)}")
 
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     CONFUSION_MATRIX_DIR.mkdir(parents=True, exist_ok=True)
+    PERSISTENT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    PERSISTENT_FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    fold_results, results = _load_partial_metrics()
+    fold_results, results = load_partial_metrics(RESULTS_DIR)
     full_train_class_weight = get_class_weight(y_train, num_classes)
-    holdout_all = _load_holdout_metrics_all_models()
+    holdout_all = load_csv_records(HOLDOUT_ALL_MODELS_PATH)
     _persist_progress_state(fold_results, current_item=None)
 
     for model_name in MODELS:
@@ -371,12 +249,8 @@ def main():
 
             fold_scores = []
             for fold, (tr_idx, va_idx) in enumerate(rkf.split(X_train, y_train), start=1):
-                fold_item = _fold_item_key(model_name, img_size, fold)
-                existing = _find_fold_result(fold_results, model_name, img_size, fold)
-                checkpoint_path = (
-                    CHECKPOINTS_DIR
-                    / f"{model_name}_img{img_size}_fold{fold:02d}_best.weights.h5"
-                )
+                fold_item = fold_item_key(model_name, img_size, fold)
+                existing = find_fold_result(fold_results, model_name, img_size, fold)
                 if existing is not None:
                     print(f"Skipping completed fold: {model_name}|img{img_size}|fold{fold:02d}")
                     fold_scores.append(
@@ -409,12 +283,7 @@ def main():
                 fold_class_weight = get_class_weight(y_tr, num_classes)
                 model, base = build_model(model_name, num_classes, img_size, MODEL_SPECS)
 
-                should_train_fold = True
-                if checkpoint_path.exists():
-                    print(f"Checkpoint found, loading: {checkpoint_path.name}")
-                    should_train_fold = not _try_load_fold_checkpoint(model, checkpoint_path)
-
-                if should_train_fold:
+                try:
                     train_two_stage(
                         model=model,
                         base_model=base,
@@ -426,12 +295,17 @@ def main():
                         finetune_lr=FINETUNE_LR,
                         unfreeze_ratio=UNFREEZE_RATIO,
                         val_ds=val_ds,
-                        best_checkpoint_path=checkpoint_path,
                     )
+                    fold_metrics = evaluate_predictions(model, val_ds, y_va, class_names=class_names)
+                except tf.errors.ResourceExhaustedError as oom_err:
+                    print(f"[OOM] {model_name}|img{img_size}|fold{fold:02d}: {oom_err}. Skipping fold.")
+                    del model, base, train_ds, val_ds
+                    gc.collect()
+                    tf.keras.backend.clear_session()
+                    continue
 
-                fold_metrics = evaluate_predictions(model, val_ds, y_va, class_names=class_names)
                 fold_scores.append(fold_metrics)
-                fold_results = _upsert_fold_result(
+                fold_results = upsert_fold_result(
                     fold_results,
                     {"model": model_name, "img_size": img_size, "fold": fold, **fold_metrics},
                 )
@@ -452,8 +326,9 @@ def main():
                     ]
                     print("  Per-class -> " + " | ".join(per_lines))
 
-                _persist_partial_metrics(fold_results, results)
+                persist_partial_metrics(fold_results, results, RESULTS_DIR)
                 _persist_progress_state(fold_results, current_item=fold_item)
+                _sync_dir_to_persistent(RESULTS_DIR, PERSISTENT_RESULTS_DIR)
                 del model, base, train_ds, val_ds
                 gc.collect()
 
@@ -489,7 +364,7 @@ def main():
                 if not (row["model"] == model_name and int(row["img_size"]) == img_size)
             ]
             results.append(summary)
-            _persist_partial_metrics(fold_results, results)
+            persist_partial_metrics(fold_results, results, RESULTS_DIR)
             _persist_progress_state(fold_results, current_item=None)
             holdout_all = _ensure_final_model_and_holdout(
                 model_name=model_name,
@@ -524,7 +399,6 @@ def main():
             holdout_all=holdout_all,
         )
 
-    holdout_metrics_path = RESULTS_DIR / "holdout_test_metrics.csv"
     if holdout_all:
         best_holdout = next(
             (
@@ -535,12 +409,13 @@ def main():
             None,
         )
         if best_holdout is not None:
-            pd.DataFrame([best_holdout]).to_csv(holdout_metrics_path, index=False)
+            pd.DataFrame([best_holdout]).to_csv(
+                RESULTS_DIR / "holdout_test_metrics.csv", index=False
+            )
 
     best_per_arch_rows = []
     for row in (
-        df_results.sort_values("f1_macro_mean", ascending=False)
-        .groupby("model", as_index=False)
+        df_results.groupby("model", as_index=False)
         .head(1)
         .to_dict(orient="records")
     ):
@@ -551,7 +426,8 @@ def main():
         if not src_path.exists():
             print(f"[WARN] Best candidate missing on disk, skipping: {src_path.name}")
             continue
-        shutil.copy2(src_path, dst_path)
+        dst_path.unlink(missing_ok=True)
+        dst_path.symlink_to(src_path.name)
         best_per_arch_rows.append(
             {
                 "model": model_name,

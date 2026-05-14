@@ -4,6 +4,8 @@ os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
 
 from pathlib import Path
 import gc
+import shutil
+import sys
 
 import numpy as np
 import pandas as pd
@@ -11,12 +13,15 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 from utils import (
+    MODELS,
+    MODEL_SPECS,
     SpatialPooling,
     apply_fine_tuning_strategy,
     build_training_progress,
     evaluate_predictions,
     find_backbone,
     get_class_weight,
+    load_csv_records,
     load_paths_and_labels,
     make_dataset,
     plot_and_save_confusion_matrix,
@@ -31,26 +36,13 @@ from utils import (
 # Config
 # =========================
 TARGET_DATA_DIR = Path("../data/merged_dataset/local_data")
-MODELS = [
-    "mobilenetv2",
-    "efficientnetb0",
-    "mobilenetv3large",
-    "densenet121",
-    "efficientnetb3",
-    "resnet50",
-    "inceptionv3",
-    "resnet101",
-    "vgg16",
-    "vgg19",
-    "efficientnetb5",
-]
 IMAGE_SIZES = [192, 224]
 STRATEGIES = ["feature_extractor", "fine_tune_last", "fine_tune_all"]
 
 TEST_SIZE = 0.2
 VAL_SIZE = 0.2
 BATCH_SIZE = 16
-BASE_SEED = 5681
+BASE_SEED = 42
 
 TL_EPOCHS = 15
 TL_LR = 1e-4
@@ -66,67 +58,23 @@ CBAM_FINAL_MODEL_DIR = CBAM_ARTIFACTS_DIR / "final_model"
 GENERAL_ARTIFACTS_FINAL = Path(os.environ.get("ARTIFACTS_DIR", "artifacts")) / "final_model"
 
 CBAM_TL_ARTIFACTS_DIR = Path(os.environ.get("CBAM_TL_ARTIFACTS_DIR", "artifacts_cbam_tl"))
-CBAM_TL_CHECKPOINTS_DIR = CBAM_TL_ARTIFACTS_DIR / "checkpoints"
-CBAM_TL_FINAL_MODEL_DIR = CBAM_TL_ARTIFACTS_DIR / "final_model"
 CBAM_TL_RESULTS_DIR = CBAM_TL_ARTIFACTS_DIR / "results"
 RESULTS_PATH = CBAM_TL_RESULTS_DIR / "domain_shift_cbam_tl_results.csv"
 BEST_RESULTS_PATH = CBAM_TL_RESULTS_DIR / "domain_shift_cbam_tl_best_by_model.csv"
 PROGRESS_STATE_PATH = CBAM_TL_RESULTS_DIR / "cbam_tl_training_progress_state.json"
 CBAM_TL_CONFUSION_MATRIX_DIR = CBAM_TL_ARTIFACTS_DIR / "confusionmatrix"
 
-# =========================
-# Model registry
-# =========================
-MODEL_SPECS = {
-    "mobilenetv2": (
-        tf.keras.applications.MobileNetV2,
-        tf.keras.applications.mobilenet_v2.preprocess_input,
-    ),
-    "efficientnetb0": (
-        tf.keras.applications.EfficientNetB0,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-    "mobilenetv3large": (
-        tf.keras.applications.MobileNetV3Large,
-        tf.keras.applications.mobilenet_v3.preprocess_input,
-    ),
-    "densenet121": (
-        tf.keras.applications.DenseNet121,
-        tf.keras.applications.densenet.preprocess_input,
-    ),
-    "efficientnetb3": (
-        tf.keras.applications.EfficientNetB3,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-    "resnet50": (
-        tf.keras.applications.ResNet50,
-        tf.keras.applications.resnet.preprocess_input,
-    ),
-    "inceptionv3": (
-        tf.keras.applications.InceptionV3,
-        tf.keras.applications.inception_v3.preprocess_input,
-    ),
-    "resnet101": (
-        tf.keras.applications.ResNet101,
-        tf.keras.applications.resnet.preprocess_input,
-    ),
-    "vgg16": (
-        tf.keras.applications.VGG16,
-        tf.keras.applications.vgg16.preprocess_input,
-    ),
-    "vgg19": (
-        tf.keras.applications.VGG19,
-        tf.keras.applications.vgg19.preprocess_input,
-    ),
-    "efficientnetb5": (
-        tf.keras.applications.EfficientNetB5,
-        tf.keras.applications.efficientnet.preprocess_input,
-    ),
-}
+PERSISTENT_CBAM_TL_ARTIFACTS_DIR = Path(os.environ.get("PERSISTENT_CBAM_TL_ARTIFACTS_DIR", str(CBAM_TL_ARTIFACTS_DIR)))
+PERSISTENT_CBAM_TL_RESULTS_DIR = PERSISTENT_CBAM_TL_ARTIFACTS_DIR / "results"
 
 
-def _custom_objects():
-    return {"SpatialPooling": SpatialPooling}
+def _sync_dir_to_persistent(src: Path, dst: Path):
+    if src.resolve() == dst.resolve():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
 
 
 def _load_cbam_base_model(model_name, img_size):
@@ -141,7 +89,7 @@ def _load_cbam_base_model(model_name, img_size):
     for path in candidates:
         if path.exists():
             try:
-                model = tf.keras.models.load_model(path, compile=False, custom_objects=_custom_objects())
+                model = tf.keras.models.load_model(path, compile=False, custom_objects={"SpatialPooling": SpatialPooling})
             except Exception:
                 model = tf.keras.models.load_model(path, compile=False)
             return model, path
@@ -177,6 +125,7 @@ def _persist_cbam_tl_progress_state(results, current_item=None):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     set_global_seeds(BASE_SEED)
     if USE_MIXED_PRECISION:
         tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
@@ -195,20 +144,26 @@ def main():
     print(f"Target samples total: {len(X_target)}")
     print(f"Train/Val/Test: {len(X_train)}/{len(X_val)}/{len(X_test)}")
 
-    CBAM_TL_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    CBAM_TL_FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     CBAM_TL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     CBAM_TL_CONFUSION_MATRIX_DIR.mkdir(parents=True, exist_ok=True)
+    PERSISTENT_CBAM_TL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = []
-    if RESULTS_PATH.exists():
-        results = pd.read_csv(RESULTS_PATH).to_dict(orient="records")
+    results = load_csv_records(RESULTS_PATH)
     _persist_cbam_tl_progress_state(results, current_item=None)
 
     for model_name in MODELS:
         model_name_with_tag = f"{model_name}_cbam"
         _, preprocess_fn = MODEL_SPECS[model_name]
         for img_size in IMAGE_SIZES:
+            # Skip entire block if all strategies are already in the results CSV
+            done_strategies = {
+                r["strategy"] for r in results
+                if r["model"] == model_name_with_tag and int(r["img_size"]) == img_size
+            }
+            if done_strategies >= set(STRATEGIES):
+                print(f"\n===== {model_name_with_tag} | img_size={img_size}: all strategies done, skipping =====")
+                continue
+
             print(f"\n===== {model_name_with_tag} | img_size={img_size} =====")
 
             tf.keras.backend.clear_session()
@@ -258,7 +213,6 @@ def main():
                     for layer in probe_model.layers[:-1]:
                         layer.trainable = False
 
-                probe_checkpoint = CBAM_TL_CHECKPOINTS_DIR / f"{model_name_with_tag}_img{img_size}_probe.weights.h5"
                 probe_model.compile(
                     optimizer=tf.keras.optimizers.Adam(PROBE_LR),
                     loss="categorical_crossentropy",
@@ -271,7 +225,6 @@ def main():
                     class_weight=get_class_weight(y_train, num_classes),
                     callbacks=[
                         tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
-                        tf.keras.callbacks.ModelCheckpoint(filepath=str(probe_checkpoint), save_best_only=True, save_weights_only=True, verbose=0),
                     ],
                     verbose=1,
                 )
@@ -293,6 +246,17 @@ def main():
 
             for strategy in STRATEGIES:
                 print(f"\n--- Strategy: {strategy} ---")
+
+                # Skip if this strategy was already evaluated and persisted in the CSV
+                if any(
+                    r["model"] == model_name_with_tag
+                    and int(r["img_size"]) == img_size
+                    and r["strategy"] == strategy
+                    for r in results
+                ):
+                    print("Already in results, skipping.")
+                    continue
+
                 set_global_seeds(BASE_SEED)
 
                 model_ft = tf.keras.models.clone_model(base_for_tl)
@@ -303,28 +267,22 @@ def main():
                     freeze_batchnorm=FREEZE_BATCHNORM,
                 )
 
-                checkpoint_path = (
-                    CBAM_TL_CHECKPOINTS_DIR
-                    / f"{model_name_with_tag}_img{img_size}_{strategy}_best.weights.h5"
-                )
-                final_model_path = (
-                    CBAM_TL_FINAL_MODEL_DIR / f"{model_name_with_tag}_img{img_size}_{strategy}.keras"
-                )
-                if final_model_path.exists():
-                    print(f"Reusing trained TL model: {final_model_path.name}")
-                    del model_ft
-                    gc.collect()
-                    model_ft = tf.keras.models.load_model(
-                        final_model_path, compile=False, custom_objects=_custom_objects()
-                    )
-                else:
+                try:
                     train_tl(
-                        model_ft, train_ds, val_ds, class_weight, checkpoint_path,
+                        model_ft, train_ds, val_ds, class_weight,
                         epochs=TL_EPOCHS, lr=TL_LR,
                     )
-                    model_ft.save(final_model_path)
+                    after_metrics = evaluate_predictions(model_ft, test_ds, y_test)
+                except tf.errors.ResourceExhaustedError as exc:
+                    print(
+                        f"[OOM] {model_name_with_tag}|img{img_size}|{strategy}: {exc}. "
+                        "Skipping strategy — will retry on next run."
+                    )
+                    del model_ft
+                    gc.collect()
+                    tf.keras.backend.clear_session()
+                    continue
 
-                after_metrics = evaluate_predictions(model_ft, test_ds, y_test)
                 print(
                     "After TL (target test) -> "
                     f"F1-macro: {after_metrics['f1_macro']:.4f} | "
@@ -334,6 +292,7 @@ def main():
                 y_prob = model_ft.predict(test_ds, verbose=0)
                 y_pred = np.argmax(y_prob, axis=1)
                 del y_prob
+                gc.collect()
                 backbone_name = f"{model_name_with_tag}_img{img_size}_{strategy}"
                 plot_and_save_confusion_matrix(y_test, y_pred, class_names, backbone_name, CBAM_TL_CONFUSION_MATRIX_DIR)
                 print(f"Saved confusion matrix: {CBAM_TL_CONFUSION_MATRIX_DIR}/confusion_matrix_{backbone_name}.png")
@@ -344,7 +303,6 @@ def main():
                     "strategy": strategy,
                     "class_compatible": bool(is_same_num_classes),
                     "base_model_path": str(base_model_path),
-                    "tl_model_path": str(final_model_path),
                 }
                 for metric_name, before_val in before_metrics.items():
                     row[f"before_{metric_name}"] = before_val
@@ -356,6 +314,7 @@ def main():
                     by="after_f1_macro", ascending=False
                 ).to_csv(RESULTS_PATH, index=False)
                 _persist_cbam_tl_progress_state(results, current_item=f"{model_name_with_tag}|img{img_size}|{strategy}")
+                _sync_dir_to_persistent(CBAM_TL_RESULTS_DIR, PERSISTENT_CBAM_TL_RESULTS_DIR)
                 del model_ft
                 gc.collect()
 
