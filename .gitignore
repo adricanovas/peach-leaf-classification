@@ -3,3 +3,4 @@ artifacts
 artifacts*
 *.cache
 code/__pycache__/
+notebooks/__pycache__/
