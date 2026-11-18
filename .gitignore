@@ -1,6 +1,10 @@
-.idea
-artifacts
-artifacts*
+.idea/
+.venv/
+__pycache__/
+*.pyc
 *.cache
-code/__pycache__/
-notebooks/__pycache__/
+# raw experiment outputs (the released copy is in predictions/)
+runs/
+tasks/
+# public crops are not redistributed, see README
+data/public_dataset/
