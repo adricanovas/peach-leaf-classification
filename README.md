@@ -1,268 +1,122 @@
-# Peach Leaf Classification
+# Quantifying Domain Shift in Peach Leaf Damage Classification
 
-Deep learning pipeline for classifying peach leaf pathologies from cropped leaf images. The project benchmarks 11 CNN backbones with and without a CBAM (Convolutional Block Attention Module) attention mechanism, and evaluates transfer learning (domain shift) from a public dataset to a local field dataset.
+Code, orchard data, data partitions and per-leaf predictions of the article *"Quantifying Domain Shift
+in Peach Leaf Damage Classification: An Evaluation of Attention Mechanisms and Fine-Tuning
+Strategies"*, submitted to Applied Sciences (MDPI), under review.
 
----
+Authors: Adrián Cánovas-Rodríguez, Miguel A. González-Illán, Maria Fernanda García-Cruz,
+Pedro Nortes Tortosa, José Salvador Rubio-Asensio, Miguel A. Zamora-Izquierdo,
+Juan Antonio Martínez Navarro and Antonio F. Skarmeta.
 
-## Table of Contents
+Eleven ImageNet-pretrained CNNs (MobileNetV2, MobileNetV3Large, EfficientNetB0,
+DenseNet121, EfficientNetB3, ResNet50, InceptionV3, VGG16, VGG19, EfficientNetB5,
+ResNet101), each with and without a terminal-stage CBAM, are trained on 1415 public
+peach-leaf crops (six classes) and evaluated and adapted on 182 leaves from a commercial
+orchard (four classes). Input size is 224 for all models. All splits are grouped by parent
+photograph.
 
-- [Overview](#overview)
-- [Classes](#classes)
-- [Project Structure](#project-structure)
-- [Dataset Structure](#dataset-structure)
-- [Installation](#installation)
-- [Running the Experiments](#running-the-experiments)
-  - [1. Base models (public dataset, no attention)](#1-base-models-public-dataset-no-attention)
-  - [2. CBAM models (public dataset, with attention)](#2-cbam-models-public-dataset-with-attention)
-  - [3. Transfer learning — Base (domain shift to local data)](#3-transfer-learning--base-domain-shift-to-local-data)
-  - [4. Transfer learning — CBAM (domain shift to local data)](#4-transfer-learning--cbam-domain-shift-to-local-data)
-- [Environment Variables](#environment-variables)
-- [Outputs](#outputs)
-- [Resumability](#resumability)
-- [Paper Visualizations](#paper-visualizations)
-- [Requirements](#requirements)
+## Data
 
----
+- Public data (not included in this repository): 1415 leaf crops from 372 photographs,
+  taken from two CC BY 4.0 datasets: 1337 leaves / 346 photos from the Mendeley dataset
+  (Ahmad, J.; Farman, H. *Dataset: Efficientnet-based robust recognition of peach plant
+  diseases in field images*. Mendeley Data, V1, 2024.
+  <https://data.mendeley.com/datasets/3pmj85snvw/1>) and 78 leaves / 26 photos from
+  PlantDoc (Singh, D. et al. *PlantDoc: A Dataset for Visual Plant Disease Detection*.
+  CoDS-COMAD 2020, pp. 249–253). Training expects the crops in
+  `data/public_dataset/public_data/<class>/` with the file names listed in
+  `splits/manifest.csv`. The released predictions and the result tables do not need them;
+  training, `peachleaf.domain_stats` and the example-leaves figure do.
+- `data/merged_dataset/local_data/<class>/`: 182 orchard leaf crops from 122 photographs
+  (Jumilla, Murcia, Spain; campaigns 2024 and 2025). Also archived, with the original
+  photographs and the COCO polygon masks, on Zenodo: <https://doi.org/10.5281/zenodo.20446064>.
 
-## Overview
+| Class | Public | Orchard |
+|---|---:|---:|
+| abiotic_stress | 118 | 24 |
+| bacterial_spot | 180 | 0 |
+| chewing_insect | 45 | 7 |
+| healthy | 951 | 107 |
+| mechanical_stress | 58 | 44 |
+| mite_presence | 63 | 0 |
 
-The pipeline is split into four independent training scripts, each runnable from the `code/` directory:
+## Layout
 
-| Script | Dataset | Architecture |
-|---|---|---|
-| `base_model_train.py` | Public dataset | Standard CNN backbones |
-| `cbam_model_train.py` | Public dataset | CNN backbones + CBAM attention |
-| `base_tl_model_train.py` | Local field data (transfer learning) | Pre-trained base models fine-tuned |
-| `cbam_tl_model_train.py` | Local field data (transfer learning) | Pre-trained CBAM models fine-tuned |
-
-All scripts use repeated stratified k-fold cross-validation (5 splits × 3 repeats), two-stage training (frozen head → fine-tuning), class weighting, and data augmentation.
-
----
-
-## Classes
-
-**Public dataset** — 6 classes:
-
-Currently empty, include here the public dataset to run the first experiment training. Here is the original distribution:
-
-| Class | Images |
+| Path | Content |
 |---|---|
-| `healthy` | 951 |
-| `bacterial_spot` | 180 |
-| `abiotic_stress` | 118 |
-| `mite_presence` | 63 |
-| `mechanical_stress` | 58 |
-| `chewing_insect` | 45 |
+| `data/` | orchard leaf crops (see above) |
+| `splits/` | `manifest.csv` (one row per leaf: path, domain, class, parent photograph, campaign, source), `splits.json` (every partition, seed 2026), `split_summary.csv` |
+| `peachleaf/` | Python package: configuration (`config.py`), data loading and augmentation, models, training, experiment stages (`run.py`), statistics and analysis |
+| `predictions/` | per-leaf softmax outputs of every trained model, `<stage>/<backbone>__<variant>/r<repeat>_f<fold>/preds.npz` with its `meta.json` (arguments, training history, versions); `cost/` holds the cost measurements. Embeddings and checkpoints are not included |
+| `reports/` | result tables (CSV) produced by the analysis; `reports/figures/` has the figures of the paper |
+| `notebooks/results_analysis.ipynb` | draws the figures of the paper and of the Supplementary Materials from `reports/` |
+| `figure_sources/` | TikZ source of the CBAM diagram |
 
-**Local dataset** (transfer learning target) — 4 classes:
+## Protocol
 
-| Class | Images |
-|---|---|
-| `healthy` | 107 |
-| `mechanical_stress` | 44 |
-| `abiotic_stress` | 24 |
-| `chewing_insect` | 7 |
-
----
-
-## Project Structure
-
-```
-peach-leaf-classification/
-├── code/
-│   ├── base_model_train.py       # Base CNN training on public dataset
-│   ├── cbam_model_train.py       # CBAM CNN training on public dataset
-│   ├── base_tl_model_train.py    # Transfer learning from base models to local data
-│   ├── cbam_tl_model_train.py    # Transfer learning from CBAM models to local data
-│   └── utils.py                  # Shared utilities (models, augmentation, metrics)
-├── data/
-│   ├── public_dataset/
-│   │   └── public_data/          # Source training data **(empty, user must upload them here)**
-│   └── merged_dataset/
-│       └── local_data/           # Target domain data (4 classes, folder-per-class)
-├── notebooks/
-│   └── paper_visualizations.ipynb  # Figures and tables from results CSVs
-├── results/                        # csvs and confusion matrix with the results of the training process
-│   ├── base_results/results/
-│   ├── cbam_results/results/
-│   ├── tl_base/results/
-│   └── tl_cbam/results/
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Dataset Structure
-
-Both datasets must follow a **one folder per class** layout:
-
-```
-public_data/
-├── healthy/
-│   ├── img001.jpg
-│   └── ...
-├── bacterial_spot/
-├── abiotic_stress/
-├── mite_presence/
-├── mechanical_stress/
-└── chewing_insect/
-
-local_data/
-├── healthy/
-├── mechanical_stress/
-├── abiotic_stress/
-└── chewing_insect/
-```
-
-By default, the scripts expect the data at:
-- `../data/public_dataset/public_data` (base and CBAM training)
-- `../data/merged_dataset/local_data` (transfer learning)
-
-These paths can be overridden — see [Environment Variables](#environment-variables).
-
----
+- Public data: photo-grouped hold-out test (283 leaves / 73 photos) and photo-grouped
+  5-fold cross-validation repeated 3 times on the remaining development set (15 models
+  per architecture).
+- Orchard data: zero-shot evaluation on all 182 leaves; adaptation with photo-grouped
+  5-fold CV repeated 3 times, with an inner grouped validation split for early stopping and
+  strategy selection, so test folds are never used for any decision.
+- The six-way softmax is kept everywhere; the two classes absent from the orchard are
+  masked at evaluation.
+- Every unit stores per-leaf probabilities, so metrics, bootstrap confidence intervals and
+  paired tests are computed afterwards without retraining.
 
 ## Installation
 
-Python 3.10+ and a CUDA-compatible GPU are recommended.
+Python 3.11:
 
 ```bash
-git clone https://github.com/<your-org>/peach-leaf-classification.git
-cd peach-leaf-classification
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Note:** `tensorflow[and-cuda]==2.20.0` is pinned in `requirements.txt`. If running on CPU only, replace it with `tensorflow==2.20.0`.
+Versions are pinned (TensorFlow 2.20, Keras 3.15). Experiments ran on NVIDIA L40S GPUs.
 
----
+## Reproducing the tables and figures
 
-## Running the Experiments
-
-All scripts must be run from the `code/` directory so relative data paths resolve correctly.
+From the released predictions, without retraining:
 
 ```bash
-cd code/
+PEACH_RUNS_ROOT=predictions python -m peachleaf.analysis                 # result CSVs -> reports/
+jupyter nbconvert --execute --inplace notebooks/results_analysis.ipynb   # figures -> reports/figures/
+python -m peachleaf.domain_stats                                         # image statistics of the domain shift (CPU)
 ```
 
-### 1. Base models (public dataset, no attention)
+## Running the experiments
 
 ```bash
-python base_model_train.py
+python -m peachleaf.splits                 # regenerate manifest and splits (deterministic)
+python -m peachleaf.run source --backbone efficientnetb0 --variant cbam --repeat 1 --fold 1
+python -m peachleaf.run adapt  --backbone efficientnetb0 --variant cbam --repeat 1 --fold 1
+python -m peachleaf.tasks --list           # pending/total units of every task group
 ```
 
-Trains 11 backbone architectures (MobileNetV2, EfficientNetB0/B3/B5, MobileNetV3Large, DenseNet121, ResNet50/101, InceptionV3, VGG16, VGG19) at two input resolutions (192×192 and 224×224) using 5×3 repeated stratified k-fold CV.
+| Stage | Description |
+|---|---|
+| `source` | training on the public data (base and CBAM; ablation variants `se`, `cbam_channel`, `cbam_spatial`, `cbam_2stage` on three backbones) |
+| `adabn` | label-free BatchNorm statistics alignment on orchard images |
+| `adapt` | adaptation with orchard labels: linear probing (`lp`), fine-tuning of the last block (`ftl`), fine-tuning of all layers (`fta`) and LP-FT (`lpft`); WiSE-FT interpolations are also stored but not reported in the article |
+| `scratch` | ImageNet → orchard only (no public data) |
+| `joint` | joint training on public and orchard data |
+| `curve` | learning curve versus number of labelled orchard leaves |
+| `cost` | parameters, FLOPs, latency and memory |
 
-Artifacts are saved to `artifacts/` by default (configurable via `ARTIFACTS_DIR`).
+Each unit writes `runs/<stage>/<backbone>__<variant>/r<repeat>_f<fold>/` with `preds.npz`,
+`meta.json` and `DONE`. `PEACH_SMOKE=1` runs every stage with one epoch.
+`python -m peachleaf.tasks` writes the pending units of each group as text files (one
+`peachleaf.run` argument line per unit) that can be fed to any job scheduler; units that already have a `DONE` file are skipped.
 
-### 2. CBAM models (public dataset, with attention)
+## Licence
 
-```bash
-python cbam_model_train.py
-```
+Code: MIT (`LICENSE`). Orchard dataset: see the Zenodo record. The public images keep the
+CC BY 4.0 licence of their original datasets.
 
-Same architecture sweep as above, with a CBAM attention block inserted after each backbone. Artifacts saved to `artifacts_cbam/` by default (configurable via `CBAM_ARTIFACTS_DIR`).
+## Citation
 
-### 3. Transfer learning — Base (domain shift to local data)
-
-> Requires Step 1 to have completed: the final `.keras` models must exist in `artifacts/final_model/`.
-
-```bash
-python base_tl_model_train.py
-```
-
-Loads each best base model and fine-tunes it on the local dataset. Artifacts saved to `artifacts_tl/` (configurable via `TL_ARTIFACTS_DIR`).
-
-### 4. Transfer learning — CBAM (domain shift to local data)
-
-> Requires Step 2 to have completed: the final `.keras` models must exist in `artifacts_cbam/final_model/`.
-
-```bash
-python cbam_tl_model_train.py
-```
-
-Same as above but starting from CBAM-trained weights. Artifacts saved to `artifacts_cbam_tl/` (configurable via `CBAM_TL_ARTIFACTS_DIR`).
-
----
-
-## Environment Variables
-
-All artifact paths can be redirected via environment variables, which is useful for running on cloud environments (e.g. Google Colab with Drive mounts):
-
-| Variable | Default | Used by |
-|---|---|---|
-| `ARTIFACTS_DIR` | `artifacts` | base train, TL base, TL CBAM |
-| `CBAM_ARTIFACTS_DIR` | `artifacts_cbam` | CBAM train, TL CBAM |
-| `TL_ARTIFACTS_DIR` | `artifacts_tl` | TL base |
-| `CBAM_TL_ARTIFACTS_DIR` | `artifacts_cbam_tl` | TL CBAM |
-| `PERSISTENT_ARTIFACTS_DIR` | same as `ARTIFACTS_DIR` | base train |
-| `PERSISTENT_CBAM_ARTIFACTS_DIR` | same as `CBAM_ARTIFACTS_DIR` | CBAM train |
-| `PERSISTENT_TL_ARTIFACTS_DIR` | same as `TL_ARTIFACTS_DIR` | TL base |
-| `PERSISTENT_CBAM_TL_ARTIFACTS_DIR` | same as `CBAM_TL_ARTIFACTS_DIR` | TL CBAM |
-
-`PERSISTENT_*` variables allow writing incremental results to a separate location (e.g. a mounted Drive) while keeping intermediate files local.
-
-Example (Colab):
-
-```python
-import os
-os.environ["ARTIFACTS_DIR"] = "/content/artifacts"
-os.environ["PERSISTENT_ARTIFACTS_DIR"] = "/content/drive/MyDrive/peach/artifacts"
-```
-
----
-
-## Outputs
-
-Each training script produces the following under its artifacts directory:
-
-```
-artifacts/
-├── final_model/
-│   ├── <model>_img<size>_final.keras   # Final model per architecture+resolution
-│   └── <model>_best_final.keras        # Symlink to best resolution per architecture
-├── confusionmatrix/
-│   └── <model>_img<size>_cm.png
-└── results/
-    ├── cv_fold_metrics.csv              # Per-fold metrics for all models
-    ├── cv_ranking.csv                   # Cross-validation ranking
-    ├── holdout_test_metrics.csv         # Best model holdout results
-    ├── holdout_test_metrics_all_models.csv
-    ├── best_model_per_architecture.csv
-    └── training_progress_state.json     # Resume checkpoint
-```
-
----
-
-## Resumability
-
-All four scripts support **automatic resumption**. If a run is interrupted, re-running the same script will skip already-completed folds and continue from where it left off. Progress is tracked in `training_progress_state.json` inside the results directory.
-
----
-
-## Paper Visualizations
-
-After all experiments have completed, open the notebook to reproduce the paper figures:
-
-```bash
-jupyter notebook notebooks/paper_visualizations.ipynb
-```
-
-The notebook reads exclusively from the results CSVs (no model loading required). Update the CSV path variables in **Cell 1** if your artifacts directory differs from the defaults.
-
----
-
-## Requirements
-
-```
-tensorflow[and-cuda]==2.20.0
-tensorboard
-numpy
-pandas
-scikit-learn
-albumentations
-opencv-python-headless
-ultralytics
-matplotlib
-seaborn
-```
+If you use this code or data, please cite the article (the reference will be added upon
+publication) and the original public datasets.
