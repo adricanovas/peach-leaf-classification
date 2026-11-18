@@ -1,0 +1,28 @@
+{
+ "args": {
+  "stage": "adabn",
+  "backbone": "inceptionv3",
+  "variant": "cbam",
+  "repeat": 1,
+  "fold": 1,
+  "strategies": [
+   "lp",
+   "ftl",
+   "fta",
+   "lpft"
+  ],
+  "device": "gpu",
+  "threads": 0,
+  "force": false
+ },
+ "python": "3.11.15",
+ "started": 1792148425.113924,
+ "adabn_bn_layers": 94,
+ "align_bn_layers": 94,
+ "finished": 1792148465.0037065,
+ "tf": "2.20.0",
+ "keras": "3.15.1",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ]
+}

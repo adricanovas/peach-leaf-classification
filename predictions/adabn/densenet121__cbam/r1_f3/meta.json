@@ -1,0 +1,28 @@
+{
+ "args": {
+  "stage": "adabn",
+  "backbone": "densenet121",
+  "variant": "cbam",
+  "repeat": 1,
+  "fold": 3,
+  "strategies": [
+   "lp",
+   "ftl",
+   "fta",
+   "lpft"
+  ],
+  "device": "gpu",
+  "threads": 0,
+  "force": false
+ },
+ "python": "3.11.15",
+ "started": 1792148212.5780978,
+ "adabn_bn_layers": 121,
+ "align_bn_layers": 121,
+ "finished": 1792148278.4546394,
+ "tf": "2.20.0",
+ "keras": "3.15.1",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ]
+}

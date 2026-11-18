@@ -1,0 +1,28 @@
+{
+ "backbone": "densenet121",
+ "variant": "none",
+ "device": "gpu",
+ "threads": 0,
+ "cpu": "x86_64",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ],
+ "gpu_name": "NVIDIA L40S",
+ "params": 7043654,
+ "attention_params": 0,
+ "flops": 5700432484,
+ "file_mb": 28.32427978515625,
+ "bs1_latency_ms_mean": 5.666446213144809,
+ "bs1_latency_ms_median": 5.661132745444775,
+ "bs1_latency_ms_p95": 5.999747780151665,
+ "bs1_latency_ms_std": 0.19542051801590737,
+ "bs1_throughput_img_s": 176.64309334640652,
+ "bs1_peak_gpu_mb": 221.6474609375,
+ "bs32_latency_ms_mean": 17.042025392875075,
+ "bs32_latency_ms_median": 17.029755050316453,
+ "bs32_latency_ms_p95": 17.1474349219352,
+ "bs32_latency_ms_std": 0.06302805853191588,
+ "bs32_throughput_img_s": 1879.064020912348,
+ "bs32_peak_gpu_mb": 6362.52685546875,
+ "peak_rss_mb": 2032.83203125
+}

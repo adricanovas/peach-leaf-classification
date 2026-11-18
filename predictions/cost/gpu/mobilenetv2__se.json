@@ -1,0 +1,28 @@
+{
+ "backbone": "mobilenetv2",
+ "variant": "se",
+ "device": "gpu",
+ "threads": 0,
+ "cpu": "x86_64",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ],
+ "gpu_name": "NVIDIA L40S",
+ "params": 2471830,
+ "attention_params": 206160,
+ "flops": 613278004,
+ "file_mb": 10.003861427307129,
+ "bs1_latency_ms_mean": 1.8693548906594515,
+ "bs1_latency_ms_median": 1.8637408502399921,
+ "bs1_latency_ms_p95": 1.8970518838614225,
+ "bs1_latency_ms_std": 0.04204190284393319,
+ "bs1_throughput_img_s": 536.5552833545667,
+ "bs1_peak_gpu_mb": 96.53369140625,
+ "bs32_latency_ms_mean": 6.956953136250377,
+ "bs32_latency_ms_median": 6.965409033000469,
+ "bs32_latency_ms_p95": 7.015019352547824,
+ "bs32_latency_ms_std": 0.03878099412812508,
+ "bs32_throughput_img_s": 4594.13077514781,
+ "bs32_peak_gpu_mb": 2820.631103515625,
+ "peak_rss_mb": 1615.03515625
+}

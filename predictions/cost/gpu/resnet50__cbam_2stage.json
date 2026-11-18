@@ -1,0 +1,28 @@
+{
+ "backbone": "resnet50",
+ "variant": "cbam_2stage",
+ "device": "gpu",
+ "threads": 0,
+ "cpu": "x86_64",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ],
+ "gpu_name": "NVIDIA L40S",
+ "params": 24264970,
+ "attention_params": 658820,
+ "flops": 7755318200,
+ "file_mb": 93.25431060791016,
+ "bs1_latency_ms_mean": 3.107567811384797,
+ "bs1_latency_ms_median": 3.0835471116006374,
+ "bs1_latency_ms_p95": 3.190172277390957,
+ "bs1_latency_ms_std": 0.11314435235375195,
+ "bs1_throughput_img_s": 324.3018393453085,
+ "bs1_peak_gpu_mb": 264.4697265625,
+ "bs32_latency_ms_mean": 15.956316608935595,
+ "bs32_latency_ms_median": 15.949758933857083,
+ "bs32_latency_ms_p95": 15.990432049147785,
+ "bs32_latency_ms_std": 0.04363443832999938,
+ "bs32_throughput_img_s": 2006.2999154220781,
+ "bs32_peak_gpu_mb": 4846.18017578125,
+ "peak_rss_mb": 2337.67578125
+}

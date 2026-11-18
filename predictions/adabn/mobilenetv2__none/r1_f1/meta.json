@@ -1,0 +1,28 @@
+{
+ "args": {
+  "stage": "adabn",
+  "backbone": "mobilenetv2",
+  "variant": "none",
+  "repeat": 1,
+  "fold": 1,
+  "strategies": [
+   "lp",
+   "ftl",
+   "fta",
+   "lpft"
+  ],
+  "device": "gpu",
+  "threads": 0,
+  "force": false
+ },
+ "python": "3.11.15",
+ "started": 1792147765.5008702,
+ "adabn_bn_layers": 52,
+ "align_bn_layers": 52,
+ "finished": 1792147784.2851386,
+ "tf": "2.20.0",
+ "keras": "3.15.1",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ]
+}

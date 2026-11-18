@@ -1,0 +1,28 @@
+{
+ "args": {
+  "stage": "adabn",
+  "backbone": "resnet101",
+  "variant": "none",
+  "repeat": 1,
+  "fold": 2,
+  "strategies": [
+   "lp",
+   "ftl",
+   "fta",
+   "lpft"
+  ],
+  "device": "gpu",
+  "threads": 0,
+  "force": false
+ },
+ "python": "3.11.15",
+ "started": 1792148619.4404387,
+ "adabn_bn_layers": 104,
+ "align_bn_layers": 104,
+ "finished": 1792148683.5204718,
+ "tf": "2.20.0",
+ "keras": "3.15.1",
+ "gpu": [
+  "/physical_device:GPU:0"
+ ]
+}
