@@ -1,0 +1,65 @@
+model,setting,true,pred,mean_count
+EfficientNetB3 + CBAM,zero-shot,abiotic_stress,abiotic_stress,17.666666666666668
+EfficientNetB3 + CBAM,zero-shot,abiotic_stress,chewing_insect,0.0
+EfficientNetB3 + CBAM,zero-shot,abiotic_stress,healthy,2.6666666666666665
+EfficientNetB3 + CBAM,zero-shot,abiotic_stress,mechanical_stress,3.6666666666666665
+EfficientNetB3 + CBAM,zero-shot,chewing_insect,abiotic_stress,1.0
+EfficientNetB3 + CBAM,zero-shot,chewing_insect,chewing_insect,2.0
+EfficientNetB3 + CBAM,zero-shot,chewing_insect,healthy,2.0
+EfficientNetB3 + CBAM,zero-shot,chewing_insect,mechanical_stress,2.0
+EfficientNetB3 + CBAM,zero-shot,healthy,abiotic_stress,11.666666666666666
+EfficientNetB3 + CBAM,zero-shot,healthy,chewing_insect,0.0
+EfficientNetB3 + CBAM,zero-shot,healthy,healthy,84.0
+EfficientNetB3 + CBAM,zero-shot,healthy,mechanical_stress,11.333333333333334
+EfficientNetB3 + CBAM,zero-shot,mechanical_stress,abiotic_stress,4.333333333333333
+EfficientNetB3 + CBAM,zero-shot,mechanical_stress,chewing_insect,0.0
+EfficientNetB3 + CBAM,zero-shot,mechanical_stress,healthy,11.666666666666666
+EfficientNetB3 + CBAM,zero-shot,mechanical_stress,mechanical_stress,28.0
+EfficientNetB3 + CBAM,adapted (nested),abiotic_stress,abiotic_stress,18.666666666666668
+EfficientNetB3 + CBAM,adapted (nested),abiotic_stress,chewing_insect,0.0
+EfficientNetB3 + CBAM,adapted (nested),abiotic_stress,healthy,1.0
+EfficientNetB3 + CBAM,adapted (nested),abiotic_stress,mechanical_stress,4.333333333333333
+EfficientNetB3 + CBAM,adapted (nested),chewing_insect,abiotic_stress,0.0
+EfficientNetB3 + CBAM,adapted (nested),chewing_insect,chewing_insect,4.333333333333333
+EfficientNetB3 + CBAM,adapted (nested),chewing_insect,healthy,0.6666666666666666
+EfficientNetB3 + CBAM,adapted (nested),chewing_insect,mechanical_stress,2.0
+EfficientNetB3 + CBAM,adapted (nested),healthy,abiotic_stress,1.0
+EfficientNetB3 + CBAM,adapted (nested),healthy,chewing_insect,0.6666666666666666
+EfficientNetB3 + CBAM,adapted (nested),healthy,healthy,94.0
+EfficientNetB3 + CBAM,adapted (nested),healthy,mechanical_stress,11.333333333333334
+EfficientNetB3 + CBAM,adapted (nested),mechanical_stress,abiotic_stress,0.0
+EfficientNetB3 + CBAM,adapted (nested),mechanical_stress,chewing_insect,1.0
+EfficientNetB3 + CBAM,adapted (nested),mechanical_stress,healthy,9.333333333333334
+EfficientNetB3 + CBAM,adapted (nested),mechanical_stress,mechanical_stress,33.666666666666664
+DenseNet121,zero-shot,abiotic_stress,abiotic_stress,19.666666666666668
+DenseNet121,zero-shot,abiotic_stress,chewing_insect,0.0
+DenseNet121,zero-shot,abiotic_stress,healthy,3.0
+DenseNet121,zero-shot,abiotic_stress,mechanical_stress,1.3333333333333333
+DenseNet121,zero-shot,chewing_insect,abiotic_stress,0.0
+DenseNet121,zero-shot,chewing_insect,chewing_insect,4.333333333333333
+DenseNet121,zero-shot,chewing_insect,healthy,0.0
+DenseNet121,zero-shot,chewing_insect,mechanical_stress,2.6666666666666665
+DenseNet121,zero-shot,healthy,abiotic_stress,20.0
+DenseNet121,zero-shot,healthy,chewing_insect,1.6666666666666667
+DenseNet121,zero-shot,healthy,healthy,64.33333333333333
+DenseNet121,zero-shot,healthy,mechanical_stress,21.0
+DenseNet121,zero-shot,mechanical_stress,abiotic_stress,7.333333333333333
+DenseNet121,zero-shot,mechanical_stress,chewing_insect,1.0
+DenseNet121,zero-shot,mechanical_stress,healthy,1.3333333333333333
+DenseNet121,zero-shot,mechanical_stress,mechanical_stress,34.333333333333336
+DenseNet121,adapted (nested),abiotic_stress,abiotic_stress,19.333333333333332
+DenseNet121,adapted (nested),abiotic_stress,chewing_insect,0.0
+DenseNet121,adapted (nested),abiotic_stress,healthy,3.0
+DenseNet121,adapted (nested),abiotic_stress,mechanical_stress,1.6666666666666667
+DenseNet121,adapted (nested),chewing_insect,abiotic_stress,0.0
+DenseNet121,adapted (nested),chewing_insect,chewing_insect,4.333333333333333
+DenseNet121,adapted (nested),chewing_insect,healthy,1.0
+DenseNet121,adapted (nested),chewing_insect,mechanical_stress,1.6666666666666667
+DenseNet121,adapted (nested),healthy,abiotic_stress,2.0
+DenseNet121,adapted (nested),healthy,chewing_insect,3.0
+DenseNet121,adapted (nested),healthy,healthy,94.66666666666667
+DenseNet121,adapted (nested),healthy,mechanical_stress,7.333333333333333
+DenseNet121,adapted (nested),mechanical_stress,abiotic_stress,1.6666666666666667
+DenseNet121,adapted (nested),mechanical_stress,chewing_insect,2.6666666666666665
+DenseNet121,adapted (nested),mechanical_stress,healthy,6.666666666666667
+DenseNet121,adapted (nested),mechanical_stress,mechanical_stress,33.0

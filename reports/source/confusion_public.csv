@@ -1,0 +1,145 @@
+model,setting,true,pred,mean_count
+EfficientNetB0,,abiotic_stress,abiotic_stress,17.333333333333332
+EfficientNetB0,,abiotic_stress,bacterial_spot,0.4666666666666667
+EfficientNetB0,,abiotic_stress,chewing_insect,0.4666666666666667
+EfficientNetB0,,abiotic_stress,healthy,1.4
+EfficientNetB0,,abiotic_stress,mechanical_stress,2.2666666666666666
+EfficientNetB0,,abiotic_stress,mite_presence,2.066666666666667
+EfficientNetB0,,bacterial_spot,abiotic_stress,0.3333333333333333
+EfficientNetB0,,bacterial_spot,bacterial_spot,33.733333333333334
+EfficientNetB0,,bacterial_spot,chewing_insect,0.0
+EfficientNetB0,,bacterial_spot,healthy,0.0
+EfficientNetB0,,bacterial_spot,mechanical_stress,0.0
+EfficientNetB0,,bacterial_spot,mite_presence,1.9333333333333333
+EfficientNetB0,,chewing_insect,abiotic_stress,0.0
+EfficientNetB0,,chewing_insect,bacterial_spot,0.0
+EfficientNetB0,,chewing_insect,chewing_insect,5.8
+EfficientNetB0,,chewing_insect,healthy,1.9333333333333333
+EfficientNetB0,,chewing_insect,mechanical_stress,1.1333333333333333
+EfficientNetB0,,chewing_insect,mite_presence,0.13333333333333333
+EfficientNetB0,,healthy,abiotic_stress,4.2
+EfficientNetB0,,healthy,bacterial_spot,0.2
+EfficientNetB0,,healthy,chewing_insect,0.9333333333333333
+EfficientNetB0,,healthy,healthy,169.73333333333332
+EfficientNetB0,,healthy,mechanical_stress,5.0
+EfficientNetB0,,healthy,mite_presence,9.933333333333334
+EfficientNetB0,,mechanical_stress,abiotic_stress,0.0
+EfficientNetB0,,mechanical_stress,bacterial_spot,0.0
+EfficientNetB0,,mechanical_stress,chewing_insect,3.2666666666666666
+EfficientNetB0,,mechanical_stress,healthy,0.7333333333333333
+EfficientNetB0,,mechanical_stress,mechanical_stress,7.0
+EfficientNetB0,,mechanical_stress,mite_presence,0.0
+EfficientNetB0,,mite_presence,abiotic_stress,0.0
+EfficientNetB0,,mite_presence,bacterial_spot,0.0
+EfficientNetB0,,mite_presence,chewing_insect,0.0
+EfficientNetB0,,mite_presence,healthy,2.6666666666666665
+EfficientNetB0,,mite_presence,mechanical_stress,0.0
+EfficientNetB0,,mite_presence,mite_presence,10.333333333333334
+DenseNet121,,abiotic_stress,abiotic_stress,19.466666666666665
+DenseNet121,,abiotic_stress,bacterial_spot,0.13333333333333333
+DenseNet121,,abiotic_stress,chewing_insect,0.6666666666666666
+DenseNet121,,abiotic_stress,healthy,2.533333333333333
+DenseNet121,,abiotic_stress,mechanical_stress,0.4666666666666667
+DenseNet121,,abiotic_stress,mite_presence,0.7333333333333333
+DenseNet121,,bacterial_spot,abiotic_stress,0.8
+DenseNet121,,bacterial_spot,bacterial_spot,34.13333333333333
+DenseNet121,,bacterial_spot,chewing_insect,0.06666666666666667
+DenseNet121,,bacterial_spot,healthy,0.2
+DenseNet121,,bacterial_spot,mechanical_stress,0.13333333333333333
+DenseNet121,,bacterial_spot,mite_presence,0.6666666666666666
+DenseNet121,,chewing_insect,abiotic_stress,0.0
+DenseNet121,,chewing_insect,bacterial_spot,0.0
+DenseNet121,,chewing_insect,chewing_insect,4.8
+DenseNet121,,chewing_insect,healthy,2.066666666666667
+DenseNet121,,chewing_insect,mechanical_stress,1.6666666666666667
+DenseNet121,,chewing_insect,mite_presence,0.4666666666666667
+DenseNet121,,healthy,abiotic_stress,5.6
+DenseNet121,,healthy,bacterial_spot,0.0
+DenseNet121,,healthy,chewing_insect,0.9333333333333333
+DenseNet121,,healthy,healthy,166.13333333333333
+DenseNet121,,healthy,mechanical_stress,4.466666666666667
+DenseNet121,,healthy,mite_presence,12.866666666666667
+DenseNet121,,mechanical_stress,abiotic_stress,0.0
+DenseNet121,,mechanical_stress,bacterial_spot,0.0
+DenseNet121,,mechanical_stress,chewing_insect,2.7333333333333334
+DenseNet121,,mechanical_stress,healthy,0.8666666666666667
+DenseNet121,,mechanical_stress,mechanical_stress,6.266666666666667
+DenseNet121,,mechanical_stress,mite_presence,1.1333333333333333
+DenseNet121,,mite_presence,abiotic_stress,0.0
+DenseNet121,,mite_presence,bacterial_spot,0.0
+DenseNet121,,mite_presence,chewing_insect,0.0
+DenseNet121,,mite_presence,healthy,1.2
+DenseNet121,,mite_presence,mechanical_stress,0.0
+DenseNet121,,mite_presence,mite_presence,11.8
+EfficientNetB5,,abiotic_stress,abiotic_stress,19.4
+EfficientNetB5,,abiotic_stress,bacterial_spot,0.2
+EfficientNetB5,,abiotic_stress,chewing_insect,0.0
+EfficientNetB5,,abiotic_stress,healthy,0.9333333333333333
+EfficientNetB5,,abiotic_stress,mechanical_stress,1.6
+EfficientNetB5,,abiotic_stress,mite_presence,1.8666666666666667
+EfficientNetB5,,bacterial_spot,abiotic_stress,0.4666666666666667
+EfficientNetB5,,bacterial_spot,bacterial_spot,33.46666666666667
+EfficientNetB5,,bacterial_spot,chewing_insect,0.0
+EfficientNetB5,,bacterial_spot,healthy,0.2
+EfficientNetB5,,bacterial_spot,mechanical_stress,0.0
+EfficientNetB5,,bacterial_spot,mite_presence,1.8666666666666667
+EfficientNetB5,,chewing_insect,abiotic_stress,0.0
+EfficientNetB5,,chewing_insect,bacterial_spot,0.0
+EfficientNetB5,,chewing_insect,chewing_insect,5.733333333333333
+EfficientNetB5,,chewing_insect,healthy,1.1333333333333333
+EfficientNetB5,,chewing_insect,mechanical_stress,2.066666666666667
+EfficientNetB5,,chewing_insect,mite_presence,0.06666666666666667
+EfficientNetB5,,healthy,abiotic_stress,1.9333333333333333
+EfficientNetB5,,healthy,bacterial_spot,0.0
+EfficientNetB5,,healthy,chewing_insect,0.2
+EfficientNetB5,,healthy,healthy,179.13333333333333
+EfficientNetB5,,healthy,mechanical_stress,1.6
+EfficientNetB5,,healthy,mite_presence,7.133333333333334
+EfficientNetB5,,mechanical_stress,abiotic_stress,0.26666666666666666
+EfficientNetB5,,mechanical_stress,bacterial_spot,0.06666666666666667
+EfficientNetB5,,mechanical_stress,chewing_insect,3.8
+EfficientNetB5,,mechanical_stress,healthy,1.9333333333333333
+EfficientNetB5,,mechanical_stress,mechanical_stress,4.866666666666666
+EfficientNetB5,,mechanical_stress,mite_presence,0.06666666666666667
+EfficientNetB5,,mite_presence,abiotic_stress,0.0
+EfficientNetB5,,mite_presence,bacterial_spot,0.0
+EfficientNetB5,,mite_presence,chewing_insect,0.0
+EfficientNetB5,,mite_presence,healthy,3.2666666666666666
+EfficientNetB5,,mite_presence,mechanical_stress,0.0
+EfficientNetB5,,mite_presence,mite_presence,9.733333333333333
+EfficientNetB5 + CBAM,,abiotic_stress,abiotic_stress,19.066666666666666
+EfficientNetB5 + CBAM,,abiotic_stress,bacterial_spot,0.2
+EfficientNetB5 + CBAM,,abiotic_stress,chewing_insect,0.0
+EfficientNetB5 + CBAM,,abiotic_stress,healthy,0.9333333333333333
+EfficientNetB5 + CBAM,,abiotic_stress,mechanical_stress,1.6666666666666667
+EfficientNetB5 + CBAM,,abiotic_stress,mite_presence,2.1333333333333333
+EfficientNetB5 + CBAM,,bacterial_spot,abiotic_stress,0.7333333333333333
+EfficientNetB5 + CBAM,,bacterial_spot,bacterial_spot,33.2
+EfficientNetB5 + CBAM,,bacterial_spot,chewing_insect,0.0
+EfficientNetB5 + CBAM,,bacterial_spot,healthy,0.13333333333333333
+EfficientNetB5 + CBAM,,bacterial_spot,mechanical_stress,0.0
+EfficientNetB5 + CBAM,,bacterial_spot,mite_presence,1.9333333333333333
+EfficientNetB5 + CBAM,,chewing_insect,abiotic_stress,0.0
+EfficientNetB5 + CBAM,,chewing_insect,bacterial_spot,0.0
+EfficientNetB5 + CBAM,,chewing_insect,chewing_insect,5.6
+EfficientNetB5 + CBAM,,chewing_insect,healthy,1.1333333333333333
+EfficientNetB5 + CBAM,,chewing_insect,mechanical_stress,2.2
+EfficientNetB5 + CBAM,,chewing_insect,mite_presence,0.06666666666666667
+EfficientNetB5 + CBAM,,healthy,abiotic_stress,2.2666666666666666
+EfficientNetB5 + CBAM,,healthy,bacterial_spot,0.0
+EfficientNetB5 + CBAM,,healthy,chewing_insect,0.3333333333333333
+EfficientNetB5 + CBAM,,healthy,healthy,177.33333333333334
+EfficientNetB5 + CBAM,,healthy,mechanical_stress,1.6
+EfficientNetB5 + CBAM,,healthy,mite_presence,8.466666666666667
+EfficientNetB5 + CBAM,,mechanical_stress,abiotic_stress,0.0
+EfficientNetB5 + CBAM,,mechanical_stress,bacterial_spot,0.06666666666666667
+EfficientNetB5 + CBAM,,mechanical_stress,chewing_insect,4.2
+EfficientNetB5 + CBAM,,mechanical_stress,healthy,1.8
+EfficientNetB5 + CBAM,,mechanical_stress,mechanical_stress,4.733333333333333
+EfficientNetB5 + CBAM,,mechanical_stress,mite_presence,0.2
+EfficientNetB5 + CBAM,,mite_presence,abiotic_stress,0.0
+EfficientNetB5 + CBAM,,mite_presence,bacterial_spot,0.0
+EfficientNetB5 + CBAM,,mite_presence,chewing_insect,0.0
+EfficientNetB5 + CBAM,,mite_presence,healthy,2.6
+EfficientNetB5 + CBAM,,mite_presence,mechanical_stress,0.0
+EfficientNetB5 + CBAM,,mite_presence,mite_presence,10.4
